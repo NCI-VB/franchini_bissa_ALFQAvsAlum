@@ -1,0 +1,4106 @@
+---
+title: "CCRVB-51: Franchini ALFQAvsALUM For MS"
+author: "Kate Goldfarbmuren"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: FALSE
+editor_options:
+  
+  chunk_output_type: console
+params:  
+  ############# where is data and analysis going
+  ## these dirs should exist, usually on biowulf, but could be local
+  ### parent folder where analysis output going, subfolders will be generated
+  parent_dir: "~/../../Volumes/NCI_VB/franchini/ccrvb51_ALFQAvsALUM_KCG/ForMS" 
+  ### where is input data mastertable
+  input_dir: "~/../../Volumes/NCI_VB/franchini/ccrvb51_ALFQAvsALUM_KCG/ForMS/input_data" 
+
+  ### overall study name, will be appended to every output
+  study_name: "ccrvb51_ALFQAvsAlum"
+
+
+  ### where is the original code file, don't change
+  code_path: "~/../../Volumes/NCI_VB/goldfarbmurenkc/github/VaccineBranch/Franchini/ccrvb51_ALFQAvsALVAC_KCG.Rmd"
+  #### where R libs on biowulf, shouldn't change
+  lib_loc_to_use: "/data/goldfarbmurenkc/R/rhel8/4.3/"
+  ### general functions, shouldn't change
+  functions_path: "~/../../Volumes/NCI_VB/goldfarbmurenkc/github/VaccineBranch/general"
+---
+
+
+```{r setup, include=FALSE}
+# more substantial setup for your document
+knitr::opts_chunk$set(echo = FALSE, 
+                      fig.width = 9, 
+                      fig.height = 9, 
+                      dev = "png", #change to cairo_pdf for pdf outputs
+                      cache = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+
+
+#https://github.com/rstudio/DT/issues/867
+DT::datatable(
+  matrix(), extensions="Buttons",
+  options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+
+
+```
+
+```{r paths_lists, warning=FALSE, include=FALSE}
+############################################################
+# generate output directories
+############################################################
+parent_dir <- params$parent_dir
+input_dir <- params$input_dir
+
+#### generate
+outputIMAGES_dir = paste0(parent_dir,"/IMAGES")
+outputTABLES_dir = paste0(parent_dir,"/TABLES")
+outputRData_dir = paste0(parent_dir,"/RData")
+outputEnrichr_dir = paste0(parent_dir,"/TABLES/Enrichr")
+output_dirs <- c(outputIMAGES_dir, outputTABLES_dir, outputRData_dir, outputEnrichr_dir)
+
+for (curr_dir in output_dirs){
+  if(!(file.exists(file.path(curr_dir)))){
+    dir.create(file.path(curr_dir), showWarnings = TRUE)
+  }
+}
+code_path = params$code_path
+functions_path = params$functions_path
+```
+
+
+```{r source_pkgs, warning=FALSE, include=FALSE}
+############################################################
+# packages & functions
+############################################################
+# package list
+list.of.packages=c("openxlsx","readxl", "tidyverse","cowplot", "pheatmap","ggpubr","survival","eulerr", "enrichR","ggsurvfit","OlinkAnalyze","knitr","broom","kableExtra","gtsummary",#"org.Hs.eg.db",
+                   "gridExtra","DT","ggbeeswarm","ggrepel","plotly","ggplotify","flextable","PCAtools","officer","janitor",
+                   #"DESeq2",
+                   "RColorBrewer","colorspace","filesstrings","geepack","EnhancedVolcano",
+                   "lmerTest",
+                   "limma","edgeR","variancePartition","BiocParallel","statmod","corrplot","ggbiplot",
+                   "strex","dendsort","dendextend","ggalluvial","rstatix",
+                   "igraph")
+
+
+#install as needed
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) BiocManager::install(new.packages)
+
+# source common functions, need to have NCI_VB mounted to run this
+#source(file.path(functions_path,"CommonFunctions_KCG.R"))
+
+# Rmd functions
+#source(file.path(functions_path,'Rmd_functions_KCG.R'))
+
+# load packages
+invisible(lapply(list.of.packages, library, character.only = TRUE))
+```
+
+
+
+
+```{r loadData, warning=FALSE, include=FALSE}
+############################################################
+# master table file(s) to load
+############################################################
+
+######### read in file
+xlsx_file_path <- file.path(params$input_dir,paste0("list_of_RAWdatasets.xlsx"))
+tab_names<-openxlsx::getSheetNames(xlsx_file_path)
+### list with separate element for each tab
+masterlist <- lapply(tab_names,
+                           openxlsx::read.xlsx,xlsxFile=xlsx_file_path)
+names(masterlist) <- tab_names
+
+phen_olink <- masterlist[["olink"]] %>%
+  ### add in TOA for comparison
+  dplyr::left_join(masterlist[["Challenge"]][,c("Sample_ID","TOA")], by = "Sample_ID") %>%
+  dplyr::relocate(TOA, .after = "Time_Point")
+
+olink_assay_columns <- setdiff(colnames(phen_olink),
+                               c("animal_time_study","Study_number",
+                               "Sample_ID","Time_Point","TOA","Protective_Vaccine"))
+
+
+data_long <- masterlist[["otherAssays"]] %>%
+  ### add in TOA for comparison
+  dplyr::left_join(masterlist[["Challenge"]][,c("Sample_ID","TOA")], by = "Sample_ID") %>%
+  dplyr::relocate(TOA, .after = "Time_Point") %>%
+
+  ### make true long
+  tidyr::pivot_longer(cols = !c(Sample_ID,Group,TOA,Time_Point),
+                      names_to = "variable",
+                      values_to = "value")
+  
+
+  #### prep list for stats & plotted values
+list_of_stats <- list()
+list_of_plotted <- list()
+
+```
+
+
+# {.tabset}
+
+## Figure 1 (Infection) {.tabset}
+
+### Fig 1bcd {.tabset}
+
+Survival Curves
+
+```{r Fig1b_setup}
+#### set groups and order
+fig_name_to_use <- "Fig1b"
+group_var_to_use <- "Group"
+groups_to_use <- c("Control","Alum")
+colors_to_use <- c("black","blue")
+
+### if need to trim out any groups
+phen_long_to_use1 <- masterlist[["Challenge"]]
+
+
+```
+
+```{r TOA, results='asis', fig.height=6, fig.width=4}
+
+
+        cat("#### ",paste0(fig_name_to_use, " "),"\n")
+      cat('\n')
+ 
+####### select animals for the aquistion curve
+phen_long_to_use <- phen_long_to_use1 %>%
+  dplyr::filter(!!rlang::sym(group_var_to_use) %in% groups_to_use) %>%
+  dplyr::arrange(!!rlang::sym(group_var_to_use),Sample_ID) 
+
+
+summ <- phen_long_to_use %>% 
+  dplyr::mutate(status = recode(Infected, "0"=0,"1"=1), ## status needs to be 0,1
+                time = as.numeric(TOA),
+                vaccine = factor(!!rlang::sym(group_var_to_use), groups_to_use))
+
+
+## survival function
+#Surv(summ$time, summ$status) #calculates censored samples (i.e. that never had infection in time period observed)
+
+### set title for 2 or 3 groups
+if(length(groups_to_use)>2){
+  title_to_use <- paste0(groups_to_use[1]," n=",dim(filter(summ, vaccine == groups_to_use[1]))[1],"; ",
+                      groups_to_use[2]," n=",dim(filter(summ, vaccine == groups_to_use[2]))[1],"; ",
+                      groups_to_use[3]," n=",dim(filter(summ, vaccine == groups_to_use[3]))[1])
+}else{
+   title_to_use <- paste0(groups_to_use[1]," n=",dim(filter(summ, vaccine == groups_to_use[1]))[1],"; ",
+                      groups_to_use[2]," n=",dim(filter(summ, vaccine == groups_to_use[2]))[1])
+ 
+}
+
+
+sfit <- survfit2(Surv(time, status) ~ vaccine, data=summ) %>%
+  ggsurvfit(linewidth=1)+
+  scale_x_continuous(breaks=0:12, expand=c(0.02,0))+
+  scale_y_continuous(label = scales::percent, breaks=seq(0,1, by=0.2), expand=c(0.015,0))+
+  labs(title = title_to_use,
+       x = "Weeks",
+       y = "% uninfected macaques")+
+  scale_color_manual(values=colors_to_use)+
+  scale_fill_manual(values=colors_to_use)+
+  add_confidence_interval()+
+  add_pvalue(location = "annotation")+
+  add_risktable(times=c(seq(0,12,1)))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black")
+        )
+
+
+print(sfit)
+
+
+ cat("\n")
+  cat(' \n \n') ### this is the key!
+  
+  #### save data to list of plotted
+  list_of_plotted[[paste0(fig_name_to_use)]] <- phen_long_to_use
+  list_of_stats[[paste0(fig_name_to_use)]] <- sfit$data
+
+
+```
+
+
+
+```{r Fig1c_setup}
+#### set groups and order
+fig_name_to_use <- "Fig1c"
+group_var_to_use <- "Group"
+groups_to_use <- c("Control","ALFQA")
+colors_to_use <- c("black","red")
+
+### if need to trim out any groups
+phen_long_to_use1 <- masterlist[["Challenge"]]
+
+```
+
+```{r TOA___Fig1c, ref.label=c('TOA'), results='asis', fig.height=6, fig.width=4}
+```
+
+
+
+```{r Fig1d_setup}
+#### set groups and order
+fig_name_to_use <- "Fig1d"
+group_var_to_use <- "Group"
+groups_to_use <- c("Alum","ALFQA")
+colors_to_use <- c("blue","red")
+
+### if need to trim out any groups
+phen_long_to_use1 <- masterlist[["Challenge"]]
+
+```
+
+```{r TOA___Fig1d, ref.label=c('TOA'), results='asis', fig.height=6, fig.width=4}
+```
+
+
+### Fig 1e
+
+```{r Fig1e, results='asis', fig.height=5, fig.width=7}
+
+fig_name_to_use <- "Fig1e"
+#### plot VL vs time by group, with ave, stdev & stats between groups for each timepoint
+
+
+
+
+
+df_to_plot <- masterlist[["VL"]] %>%
+  ### make longer
+  tidyr::pivot_longer(!c(Group,Sample_ID), names_to = "Time_Point", values_to = "VL") %>%
+  ## clean up TP
+  dplyr::mutate(weeks_post_infection = as.numeric(str_after_last(Time_Point,"\\.")),
+                log10_VL = log10(VL),
+                ## factorize group
+                Group = factor(Group, c("Control","Alum","ALFQA"))) 
+
+### get geo mean & 95% CI
+df_summary <- df_to_plot %>%
+  group_by(Group,weeks_post_infection) %>%
+  dplyr::summarise(
+    sd = sd(log10_VL, na.rm = TRUE),
+    simp_mean = mean(log10_VL, na.rm = TRUE),
+    geo_mean = exp(mean(log(log10_VL[log10_VL>0]), na.rm=TRUE)),
+    N = n(),
+    
+  ) %>%
+  dplyr::mutate(se = sd/sqrt(N),
+                ciMult = qt(0.95/2 + .5, N-1), ### 95% confidence interval multiplier
+                ci = se*ciMult)
+  
+#### get MW pvalues
+stat_test <- df_to_plot %>%
+  group_by(weeks_post_infection) %>%
+  wilcox_test(log10_VL ~ Group) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance("p") %>%
+  ### remove ALFQA vs Alum
+  dplyr::filter(group1 == "Control" & group2 == "Alum" |
+                  group1 == "Control" & group2 == "ALFQA" ) %>%
+  ## sort 
+ # dplyr::arrange(group2) %>%
+  add_xy_position(x = "weeks_post_infection", dodge = 0.3) %>%
+  ### fix x position
+  dplyr::mutate(x = weeks_post_infection,
+                xmin = weeks_post_infection,
+                xmax = weeks_post_infection)
+
+
+p <- ggplot(df_summary,
+            aes(x = weeks_post_infection, y = geo_mean))+
+  geom_errorbar(
+    aes(ymin = geo_mean-ci, ymax = geo_mean+ci, color = Group),
+    position = position_dodge(0.3), width = 0.2
+    )+
+  geom_line(aes(group = Group, color = Group), position = position_dodge(0.3))+
+  geom_point(aes(color = Group), position = position_dodge(0.3)) +
+  scale_color_manual(values = c(Control = "black",
+                                Alum = "blue",
+                                ALFQA = "red"))+
+  scale_x_continuous(breaks = seq(0,12,2), limits = c(0,13), expand = c(0,0))+
+  scale_y_continuous(breaks = seq(1,10,1), limits = c(1,10), expand = c(0,0))+
+  ylab("log10(VL)")+
+  stat_pvalue_manual(stat_test,  
+                     label = "p.signif", tip.length = 0,
+                     remove.bracket = TRUE,
+                     color = "group2"
+  )+
+  theme_bw()+
+  theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank()) +
+  ## remove a from legend
+  guides(
+  color = guide_legend(
+    override.aes = aes(label = "")
+  ))
+
+plot(p)
+
+
+cat("\n")
+  cat(' \n \n') ### this is the key!
+  
+ 
+
+    #### save data to list of plotted
+  list_of_plotted[[paste0(fig_name_to_use)]] <- df_to_plot %>%
+    ### add summary stats
+    dplyr::left_join(df_summary, by = c("Group","weeks_post_infection"))
+  
+  list_of_stats[[paste0(fig_name_to_use)]] <- stat_test
+
+ 
+
+```
+
+
+## Supp Figure 1 (Viral load) {.tabset}
+
+Scatterplots vs 3 groups
+
+```{r SuppFig1_scatterplots, results='asis', fig.height=4, fig.width=4}
+
+fig_name_to_use <- "SuppFig1"
+#### plot VL vs time by group, with ave, stdev & stats between groups for each timepoint
+dodge_to_use <- 0.8
+
+df_to_plot_prep <- masterlist[["VL"]] %>%
+  ### make longer
+  tidyr::pivot_longer(!c(Group,Sample_ID), names_to = "Time_Point", values_to = "VL") %>%
+  ## clean up TP
+  dplyr::mutate(weeks_post_infection = as.numeric(str_after_last(Time_Point,"\\.")),
+                log10_VL = log10(VL),
+                ## factorize group
+                Group = factor(Group, c("Control","Alum","ALFQA"))) 
+
+### wide format for plotting
+df_to_plot <- df_to_plot_prep %>%
+  ## remove non log10
+  dplyr::select(-VL,-Time_Point) %>%
+  ## make wider
+  dplyr::mutate(weeks_post_infection = paste0("VL_week",weeks_post_infection)) %>%
+  tidyr::pivot_wider(names_from = "weeks_post_infection",
+                     values_from = "log10_VL")
+
+### get geo mean (same as normal mean) & 95% CI
+df_summary <- df_to_plot_prep %>%
+  group_by(Group,weeks_post_infection) %>%
+  dplyr::summarise(
+    sd = sd(log10_VL, na.rm = TRUE),
+    mean = mean(log10_VL, na.rm = TRUE),
+    geo_mean = exp(mean(log(log10_VL[log10_VL>0]), na.rm=TRUE)),
+    N = n(),
+    
+  ) %>%
+  dplyr::mutate(se = sd/sqrt(N),
+                ciMult = qt(0.95/2 + .5, N-1), ### 95% confidence interval multiplier
+                ci = se*ciMult)
+  
+#### get MW pvalues
+stat_test <- df_to_plot_prep %>%
+  group_by(weeks_post_infection) %>%
+  wilcox_test(log10_VL ~ Group) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance("p") 
+
+### set up df to collect stats
+stat_test <- data.frame()
+
+#### list of plots with each variable separately
+list_of_plots <- list()
+for (i in unique(df_to_plot_prep$weeks_post_infection)){
+ 
+  #### get stats formatting
+#  https://www.datanovia.com/en/blog/how-to-add-p-values-onto-a-grouped-ggplot-using-the-ggpubr-r-package/
+ 
+  
+        cat("### ",paste0("week ",i, " post infection "),"\n")
+      cat('\n')
+ 
+  ###### p values for this week
+   curr_stat_test <- df_to_plot_prep %>%
+     ## filter to this week
+     dplyr::filter(weeks_post_infection == i) %>%
+  group_by(weeks_post_infection) %>%
+  wilcox_test(log10_VL ~ Group) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance("p")  %>%
+     dplyr::filter(weeks_post_infection == i) %>%
+
+  add_xy_position(x = "weeks_post_infection", dodge = dodge_to_use) %>%
+     ### then replace x positions since aren't useful
+     dplyr::mutate(x = 2, 
+                   xmin = ifelse(group1 == "Control",1,2),
+                   xmax = ifelse(group2 == "ALFQA",3,2))
+     
+     
+  
+  dodge_to_use <- 0.8
+  #### base plot (needs to NOT be vanilla ggplot)
+  p1 <- ggbarplot(df_to_plot, x = "Group", y = paste0("VL_week",i), color = "Group", fill = "Group",
+                  add = "mean", position = position_dodge(dodge_to_use), alpha = 0.3) + 
+  scale_color_manual(values = c(Control = "black",
+                                Alum = "blue",
+                                ALFQA = "red"))+
+  scale_fill_manual(values = c(Control = "black",
+                                Alum = "blue",
+                                ALFQA = "red"))+
+    geom_beeswarm(aes(x = Group, y = !!rlang::sym(paste0("VL_week",i)), group = Group, fill = Group), dodge.width = dodge_to_use, cex = 3, size = 12, shape = 21, color = "black") + 
+    
+    # geom_bar(aes(color = Group_f),stat = "summary", fun = "mean", na.rm = TRUE,alpha = 0.3,
+    #    position = position_dodge(width = dodge_to_use), width = 0.7) +
+    #  geom_errorbar(stat = "summary", fun.data = "mean_sdl", 
+    #         fun.args = list(mult = 1),
+    #         position =  position_dodge(width = dodge_to_use), width = 0.5) +
+    # 
+  
+    #### add pvalues between gropus
+    stat_pvalue_manual(
+  curr_stat_test,  label = "p", tip.length = 0
+  )+
+    stat_summary(
+    fun = "mean",        #argument updated in new version.
+    geom = "point",
+    col = "grey30",
+    size = 3,
+    shape = 95,
+    fill = "grey"
+  )+
+
+   
+    scale_y_continuous(breaks = seq(1,10,1), limits = c(1,10),
+                       expand = expansion(mult = c(0, 0.1))
+                       )+
+    ylab(paste0("log10(VL week",i,")"))+
+
+      theme_bw()+
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size = 9),
+            axis.line = element_line(colour = "black"),
+            panel.border = element_blank(),
+    panel.background = element_blank())
+    
+plot(p1)
+    
+    
+ ### add to stat_test
+   stat_test <- rbind(stat_test, curr_stat_test)
+  
+  
+  cat("\n")
+  cat(' \n \n') ### this is the key!
+  
+}
+
+
+  
+
+ cat("\n")
+  cat(' \n \n') ### this is the key!
+  
+  
+    #### save data to list of plotted
+  list_of_plotted[[paste0(fig_name_to_use)]] <- df_to_plot 
+  
+  list_of_stats[[paste0(fig_name_to_use)]] <- stat_test
+
+ 
+
+```
+
+
+## Figure 2 (Functional Assays in Blood) {.tabset}
+
+
+```{r scatterVsGroupSetup___Fig2acefghjk}
+composite_fig_name <- "Fig2acefghjk"
+scatter_df <- data.frame("name"=c("Fig2a",
+                                  "Fig2c",
+                                  "Fig2e",
+                                  "Fig2f",
+                                  "Fig2g",
+                                  "Fig2h",
+                                  "Fig2j",
+                                  "Fig2k"),
+                         "y"=c("Plasma_peptide26gp120_antibody_response__WkPost",
+                               "Vaginal_secretions_dV1gp120_antibody_titers__WkPost",
+                               "Plasma_Trogocytosis_dV1gp120__Change",
+                               "Plasma_ADCP_SIVgp120dV1__Change",
+                               "Plasma_ADNP_SIVgp120dV1__Change",
+                               "Plasma_ADNP_SIVgp120WT__Change",
+                               "PBMCs_PctCD14_efferocytes__Change",
+                               "PBMCs_engulfing_capability__Change"),
+                         "trans_y"=c("identity",
+                                     "log10",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other"))
+
+
+fill_colors_to_use <- c(ALFQA="red",Alum="blue")
+outline_colors_to_use <- c("black","black")
+
+```
+
+```{r scatterplotsVsGroupPlot, results='asis', fig.height=3, fig.width=4}
+
+
+ #### if only one pair
+  if(dim(scatter_df)[1] == 1){
+    
+             cat(" ",paste0(composite_fig_name),"\n")
+      cat('\n')
+ 
+    
+  }else{
+    #### more than one, then start with group name in nested tabset
+    
+           cat("### ",paste0(composite_fig_name, " {.tabset}"),"\n")
+      cat('\n')
+ 
+  }
+
+#### for each pair to plot
+for(curr_pair in 1:nrow(scatter_df)){
+  
+  
+  #### if only one pair
+  if(dim(scatter_df)[1] == 1){
+    
+           cat("### ",paste0(scatter_df$name[curr_pair]),"\n")
+      cat('\n')
+ 
+  }else{
+    #### more than one, then in nested tabset
+    
+           cat("#### ",paste0(scatter_df$name[curr_pair]),"\n")
+      cat('\n')
+ 
+  }
+  
+
+  
+      if(scatter_df$dataset[curr_pair] == "other"){
+        curr_phen <- data_long %>%
+          ## combine variable/timepoint
+          dplyr::mutate(tp_simp = ifelse(grepl("Wk",Time_Point),
+                                         "WkPost",Time_Point),
+                        var_time = paste0(variable,"__",tp_simp),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        tp_simp = NULL,
+                        TOA = NULL ### not needed for this plot
+                        ) %>%
+          ### collapse duplicates with NA
+          dplyr::group_by(Sample_ID,Group,var_time) %>%
+          dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value") 
+      }else{
+        if(scatter_df$dataset[curr_pair] == "olink"){
+          curr_phen <- curr_phen_olink %>%
+            ## trim to only columns that need
+            dplyr::select(c(group,TOA,Sample_ID,Time_Point,!!!rlang::syms(olink_assay_columns_new))) %>%
+            ## make longer
+            tidyr::pivot_longer(cols = !c(group,TOA,Sample_ID,Time_Point), names_to = "variable", values_to = "value") %>%
+                      ## combine variable/timepoint
+          dplyr::mutate(var_time = paste0(variable,"__",Time_Point),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        Group = ifelse(group == "ALUM","Alum",group),
+                        TOA = NULL ### not needed for this plot
+                        ) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value")
+
+        }else{
+          if(scatter_df$dataset[curr_pair] == "otherStudy"){
+            
+            curr_phen <- masterlist[["otherStudy"]] %>%
+              dplyr::mutate(Group = factor(Group, c("Alum","ALFQA")))
+            
+          }else{
+          
+          #### for both (not used for vs TOA)
+          
+          ## first find animals that are in both datasets
+overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sample_ID)) ### 41 animals
+
+          curr_phen <- data_long %>%
+          ## combine variable/timepoint
+          dplyr::mutate(tp_simp = ifelse(grepl("Wk",Time_Point),
+                                         "WkPost",Time_Point),
+                        var_time = paste0(variable,"__",tp_simp),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        tp_simp = NULL,
+                        TOA = NULL ### not needed for this plot
+                        ) %>%
+          ### collapse duplicates with NA
+          dplyr::group_by(Sample_ID,Group,var_time) %>%
+          dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value") %>%
+  ### trim to overlapping animals
+  dplyr::filter(Sample_ID %in% overlap_animals) %>%
+  ####### add in olink
+  dplyr::full_join(phen_olink %>%
+                     ### trim to overlapping animals
+                     dplyr::filter(Sample_ID %in% overlap_animals) %>%
+                     ### combine variable & timepoint for olink assays
+                     ## first need to make longer
+                     tidyr::pivot_longer(cols = c(!!!rlang::syms(olink_assay_columns_new)),
+                                         names_to = "variable",
+                                         values_to = "value") %>%
+                     dplyr::mutate(var_time = paste0(variable,"__",Time_Point)) %>%
+                     ### remove anything with timepoint
+                     dplyr::select(Sample_ID,var_time,value) %>%
+                     tidyr::pivot_wider(names_from = "var_time",values_from = "value")
+                   ,
+                   by = c("Sample_ID"))
+          }
+        }
+      }
+      
+
+    df_for_plotting <- curr_phen %>%
+          ### trim to only these vars
+          dplyr::select(!!rlang::sym(scatter_df$y[curr_pair]),Group,Sample_ID) %>%
+      ### filter to only animals with data for this assay
+      dplyr::filter(!is.na(!!rlang::sym(scatter_df$y[curr_pair]))) %>%
+      ### factorize Group
+      dplyr::mutate(Group = factor(Group, c("Alum","ALFQA")))
+
+
+      if(scatter_df$trans_y[curr_pair] == "identity"){
+        ylab_to_use <- paste0(str_before_first(scatter_df$y[curr_pair],"__"),"\n",str_after_first(scatter_df$y[curr_pair],"__"))
+      }else{
+        ylab_to_use <- paste0(scatter_df$trans_y[curr_pair],"(",str_before_first(scatter_df$y[curr_pair],"__"),")","\n",str_after_first(scatter_df$y[curr_pair],"__") )
+      }
+      
+
+        #### plot scatterplot with both groups
+        p <- ggplot(df_for_plotting,
+                    aes(x = Group, y = !!rlang::sym(scatter_df$y[curr_pair]), fill = Group, color = Group))+
+          geom_quasirandom(width = 0.4, shape = 21, size = 3)+
+          scale_fill_manual(values = fill_colors_to_use)+
+          scale_color_manual(values = outline_colors_to_use)+          
+          #### add MW stats
+          stat_compare_means(method = "wilcox.test", label.x = 1.25, label="p.format")+
+          ### add mean
+          stat_summary(color = "black", geom = "point", shape = 95, size = 12, show.legend = F,
+                     fun = mean)+
+          ### add horizontal dotted line at zero
+          geom_hline(yintercept = 0, linetype = "dashed", color = "grey")+
+          
+
+          ylab(ylab_to_use)+
+          scale_y_continuous(transform = scatter_df$trans_y[curr_pair])+  
+
+          theme_bw()+
+              theme(
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            axis.title = element_text(size = 10),
+            panel.border = element_blank(), axis.line = element_line(colour = "black")
+        )+
+            ## remove a from legend
+  guides(
+  color = guide_legend(
+    override.aes = aes(label = "")
+  ))
+        
+        plot(p)
+        
+          
+        cat("\n")
+    cat(' \n \n') ### this is the key!
+    
+    
+    #### save
+        list_of_plotted[[paste0(scatter_df$name[curr_pair])]] <- df_for_plotting %>%
+          dplyr::relocate(Group,Sample_ID) %>%
+          ##sort by group, sampleID
+          dplyr::arrange(Group,Sample_ID) 
+          
+          
+
+  
+}
+          
+        cat("\n")
+    cat(' \n \n') ### this is the key!
+
+    
+     
+```
+
+
+
+
+```{r scatterVsOtherSetup___Fig2b}
+composite_fig_name <- ""
+scatter_df <- data.frame("name"=c("Fig2b"),
+                         "x"=c("Plasma_peptide26gp120_antibody_response__WkPost"),
+                         "trans_x"=c("identity"),
+                         "y"=c("Plasma_AvidityScore_cV2gp120__WkPost"),
+                         "trans_y"=c("log10"),
+                         "dataset"=c("other"))
+
+
+```
+
+```{r scatterplotsVsOtherPlot, results='asis', fig.height=4, fig.width=5}
+
+
+ #### if only one pair
+  if(dim(scatter_df)[1] == 1){
+    
+             cat(" ",paste0(composite_fig_name),"\n")
+      cat('\n')
+ 
+    
+  }else{
+    #### more than one, then start with group name in nested tabset
+    
+           cat("### ",paste0(composite_fig_name, " {.tabset}"),"\n")
+      cat('\n')
+ 
+  }
+
+#### for each pair to plot
+for(curr_pair in 1:nrow(scatter_df)){
+  
+  
+  #### if only one pair
+  if(dim(scatter_df)[1] == 1){
+    
+           cat("### ",paste0(scatter_df$name[curr_pair]),"\n")
+      cat('\n')
+ 
+  }else{
+    #### more than one, then in nested tabset
+    
+           cat("#### ",paste0(scatter_df$name[curr_pair]),"\n")
+      cat('\n')
+ 
+  }
+  
+    
+           cat(" ",paste0(scatter_df$x[curr_pair]," vs ",scatter_df$y[curr_pair]),"\n")
+      cat('\n')
+  
+      if(scatter_df$dataset[curr_pair] == "other"){
+        curr_phen <- data_long %>%
+          ## combine variable/timepoint
+          dplyr::mutate(tp_simp = ifelse(grepl("Wk",Time_Point),
+                                         "WkPost",Time_Point),
+                        var_time = paste0(variable,"__",tp_simp),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        tp_simp = NULL) %>%
+          ### collapse duplicates with NA
+          dplyr::group_by(Sample_ID,Group,TOA,var_time) %>%
+          dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value")
+      }else{
+        if(scatter_df$dataset[curr_pair] == "olink"){
+          curr_phen <- curr_phen_olink %>%
+            ## trim to only columns that need
+            dplyr::select(c(group,TOA,Sample_ID,Time_Point,!!!rlang::syms(olink_assay_columns_new))) %>%
+            ## make longer
+            tidyr::pivot_longer(cols = !c(group,TOA,Sample_ID,Time_Point), names_to = "variable", values_to = "value") %>%
+                      ## combine variable/timepoint
+          dplyr::mutate(var_time = paste0(variable,"__",Time_Point),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        Group = group) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value")
+
+        }else{
+          #### for both
+          
+          ## first find animals that are in both datasets
+overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sample_ID)) ### 41 animals
+
+          curr_phen <- data_long %>%
+          ## combine variable/timepoint
+          dplyr::mutate(tp_simp = ifelse(grepl("Wk",Time_Point),
+                                         "WkPost",Time_Point),
+                        var_time = paste0(variable,"__",tp_simp),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        tp_simp = NULL) %>%
+          ### collapse duplicates with NA
+          dplyr::group_by(Sample_ID,Group,TOA,var_time) %>%
+          dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value") %>%
+  ### trim to overlapping animals
+  dplyr::filter(Sample_ID %in% overlap_animals) %>%
+  ####### add in olink
+  dplyr::full_join(phen_olink %>%
+                     ### trim to overlapping animals
+                     dplyr::filter(Sample_ID %in% overlap_animals) %>%
+                     ### combine variable & timepoint for olink assays
+                     ## first need to make longer
+                     tidyr::pivot_longer(cols = c(!!!rlang::syms(olink_assay_columns_new)),
+                                         names_to = "variable",
+                                         values_to = "value") %>%
+                     dplyr::mutate(var_time = paste0(variable,"__",Time_Point)) %>%
+                     ### remove anything with timepoint
+                     dplyr::select(Sample_ID,var_time,value) %>%
+                     tidyr::pivot_wider(names_from = "var_time",values_from = "value")
+                   ,
+                   by = c("Sample_ID"))
+        }
+      }
+      
+
+    df_for_plotting <- curr_phen %>%
+          ### trim to only these vars
+          dplyr::select(!!rlang::sym(scatter_df$x[curr_pair]),!!rlang::sym(scatter_df$y[curr_pair]),Group,Sample_ID) %>%
+            ### filter to only animals with data for these assays
+      dplyr::filter(!is.na(!!rlang::sym(scatter_df$y[curr_pair])) & !is.na(!!rlang::sym(scatter_df$x[curr_pair]))) 
+
+      if(scatter_df$trans_x[curr_pair] == "identity"){
+        xlab_to_use <- paste0(str_before_first(scatter_df$x[curr_pair],"__"),"\n",str_after_first(scatter_df$x[curr_pair],"__"))
+      }else{
+        xlab_to_use <- paste0(scatter_df$trans_x[curr_pair],"(",str_before_first(scatter_df$x[curr_pair],"__"),")","\n",str_after_first(scatter_df$x[curr_pair],"__") )
+      }
+
+           if(scatter_df$trans_y[curr_pair] == "identity"){
+        ylab_to_use <- paste0(str_before_first(scatter_df$y[curr_pair],"__"),"\n",str_after_first(scatter_df$y[curr_pair],"__"))
+      }else{
+        ylab_to_use <- paste0(scatter_df$trans_y[curr_pair],"(",str_before_first(scatter_df$y[curr_pair],"__"),")","\n",str_after_first(scatter_df$y[curr_pair],"__") )
+      }
+      
+
+        #### plot scatterplot with both groups
+        p <- ggplot(df_for_plotting,
+                    aes(x = !!rlang::sym(scatter_df$x[curr_pair]), y = !!rlang::sym(scatter_df$y[curr_pair]), fill = Group))+
+          geom_point(shape = 21, size = 3)+
+          scale_fill_manual(values = c("red","blue"))+
+          ### add spearman stats
+          stat_cor(aes(color = Group), method = "spearman", show.legend = FALSE)+
+          ### add reg line
+          geom_smooth(aes(x = as.numeric(!!rlang::sym(scatter_df$x[curr_pair])), color = Group), method = lm, se = FALSE, linewidth = 0.5, formula = 'y ~ x ') +
+         scale_x_continuous(transform = scatter_df$trans_x[curr_pair])+  
+          xlab(xlab_to_use)+
+          ylab(ylab_to_use)+
+          scale_y_continuous(transform = scatter_df$trans_y[curr_pair])+  
+          scale_color_manual(values = c("red","blue"))+
+          theme_bw()+
+              theme(
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            axis.title = element_text(size = 10),
+            panel.border = element_blank(), axis.line = element_line(colour = "black")
+        )
+        
+        plot(p)
+        
+          
+        cat("\n")
+    cat(' \n \n') ### this is the key!
+    
+    
+    #### save
+        list_of_plotted[[paste0(scatter_df$name[curr_pair])]] <- df_for_plotting %>%
+          dplyr::relocate(Group,Sample_ID) %>%
+          ##sort by group, sampleID
+          dplyr::arrange(Group,Sample_ID)
+
+  
+}
+          
+        cat("\n")
+    cat(' \n \n') ### this is the key!
+
+    
+     
+```
+
+
+
+```{r scatterVsTOASetup___Fig2di}
+composite_fig_name <- "Fig2di"
+scatter_df <- data.frame("name"=c("Fig2d",
+                                  "Fig2i"),
+                         "y"=c("Plasma_ADCC_Killing__WkPost",
+                               "Plasma_ADNP_SIVgp120dV1__Change"),
+                         "trans_y"=c("identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other"))
+
+```
+
+```{r scatterplotsVsTOAPlot, results='asis', fig.height=4, fig.width=5}
+
+
+ #### if only one pair
+  if(dim(scatter_df)[1] == 1){
+    
+             cat(" ",paste0(composite_fig_name),"\n")
+      cat('\n')
+ 
+    
+  }else{
+    #### more than one, then start with group name in nested tabset
+    
+           cat("### ",paste0(composite_fig_name, " {.tabset}"),"\n")
+      cat('\n')
+ 
+  }
+
+#### for each pair to plot
+for(curr_pair in 1:nrow(scatter_df)){
+  
+  
+  #### if only one pair
+  if(dim(scatter_df)[1] == 1){
+    
+           cat("### ",paste0(scatter_df$name[curr_pair]),"\n")
+      cat('\n')
+ 
+  }else{
+    #### more than one, then in nested tabset
+    
+           cat("#### ",paste0(scatter_df$name[curr_pair]),"\n")
+      cat('\n')
+ 
+  }
+  
+
+  
+      if(scatter_df$dataset[curr_pair] == "other"){
+        curr_phen <- data_long %>%
+          ## combine variable/timepoint
+          dplyr::mutate(tp_simp = ifelse(grepl("Wk",Time_Point),
+                                         "WkPost",Time_Point),
+                        var_time = paste0(variable,"__",tp_simp),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        tp_simp = NULL) %>%
+          ### collapse duplicates with NA
+          dplyr::group_by(Sample_ID,Group,TOA,var_time) %>%
+          dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value")
+      }else{
+        if(scatter_df$dataset[curr_pair] == "olink"){
+          curr_phen <- curr_phen_olink %>%
+            ## trim to only columns that need
+            dplyr::select(c(group,TOA,Sample_ID,Time_Point,!!!rlang::syms(olink_assay_columns_new))) %>%
+            ## make longer
+            tidyr::pivot_longer(cols = !c(group,TOA,Sample_ID,Time_Point), names_to = "variable", values_to = "value") %>%
+                      ## combine variable/timepoint
+          dplyr::mutate(var_time = paste0(variable,"__",Time_Point),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        Group = group) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value")
+
+        }else{
+          #### for both (not used for vs TOA)
+          
+          ## first find animals that are in both datasets
+overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sample_ID)) ### 41 animals
+
+          curr_phen <- data_long %>%
+          ## combine variable/timepoint
+          dplyr::mutate(tp_simp = ifelse(grepl("Wk",Time_Point),
+                                         "WkPost",Time_Point),
+                        var_time = paste0(variable,"__",tp_simp),
+                        variable = NULL,
+                        Time_Point = NULL,
+                        tp_simp = NULL) %>%
+          ### collapse duplicates with NA
+          dplyr::group_by(Sample_ID,Group,TOA,var_time) %>%
+          dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+          ### make wider
+          tidyr::pivot_wider(names_from = "var_time", values_from = "value") %>%
+  ### trim to overlapping animals
+  dplyr::filter(Sample_ID %in% overlap_animals) %>%
+  ####### add in olink
+  dplyr::full_join(phen_olink %>%
+                     ### trim to overlapping animals
+                     dplyr::filter(Sample_ID %in% overlap_animals) %>%
+                     ### combine variable & timepoint for olink assays
+                     ## first need to make longer
+                     tidyr::pivot_longer(cols = c(!!!rlang::syms(olink_assay_columns_new)),
+                                         names_to = "variable",
+                                         values_to = "value") %>%
+                     dplyr::mutate(var_time = paste0(variable,"__",Time_Point)) %>%
+                     ### remove anything with timepoint
+                     dplyr::select(Sample_ID,var_time,value) %>%
+                     tidyr::pivot_wider(names_from = "var_time",values_from = "value")
+                   ,
+                   by = c("Sample_ID"))
+        }
+      }
+      
+
+    df_for_plotting <- curr_phen %>%
+          ### trim to only these vars
+          dplyr::select(TOA,!!rlang::sym(scatter_df$y[curr_pair]),Group,Sample_ID) %>%
+            ### filter to only animals with data for these assays
+      dplyr::filter(!is.na(!!rlang::sym(scatter_df$y[curr_pair])) & !is.na(TOA))
+
+
+      if(scatter_df$trans_y[curr_pair] == "identity"){
+        ylab_to_use <- paste0(str_before_first(scatter_df$y[curr_pair],"__"),"\n",str_after_first(scatter_df$y[curr_pair],"__"))
+      }else{
+        ylab_to_use <- paste0(scatter_df$trans_y[curr_pair],"(",str_before_first(scatter_df$y[curr_pair],"__"),")","\n",str_after_first(scatter_df$y[curr_pair],"__") )
+      }
+      
+
+        #### plot scatterplot with both groups
+        p <- ggplot(df_for_plotting,
+                    aes(x = TOA, y = !!rlang::sym(scatter_df$y[curr_pair]), fill = Group))+
+          geom_point(shape = 21, size = 3)+
+          scale_fill_manual(values = c("red","blue"))+
+          ### add spearman stats
+          stat_cor(aes(color = Group), method = "spearman", show.legend = FALSE)+
+          ### add reg line
+          geom_smooth(aes(x = as.numeric(TOA), color = Group), method = lm, se = FALSE, linewidth = 0.5, formula = 'y ~ x ') +
+         scale_x_continuous(breaks = seq(0,12,1), limits = c(0,12))+  
+          xlab("N. vaginal challenges")+
+          ylab(ylab_to_use)+
+          scale_y_continuous(transform = scatter_df$trans_y[curr_pair])+  
+          scale_color_manual(values = c("red","blue"))+
+          theme_bw()+
+              theme(
+            panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+            axis.title = element_text(size = 10),
+            panel.border = element_blank(), axis.line = element_line(colour = "black")
+        )
+        
+        plot(p)
+        
+          
+        cat("\n")
+    cat(' \n \n') ### this is the key!
+    
+    
+    #### save
+        list_of_plotted[[paste0(scatter_df$name[curr_pair])]] <- df_for_plotting %>%
+          dplyr::relocate(Group,Sample_ID) %>%
+          ##sort by group, sampleID
+          dplyr::arrange(Group,Sample_ID)
+
+  
+}
+          
+        cat("\n")
+    cat(' \n \n') ### this is the key!
+
+    
+     
+```
+
+
+
+
+
+```{r setup___Fig2l}
+fig_name_to_use <- "Fig2l"
+assays_to_use <- sort(unique(data_long$variable)[!grepl("RectMucosa", unique(data_long$variable))])
+```
+
+### `r paste0(fig_name_to_use)` {.tabset}
+
+```{r setSamples_other}
+### curr_phen has rows = animals/time, columns = assays
+curr_phen <- data_long %>%
+  ## make simpler timepoint
+  dplyr::mutate(Time_simp = ifelse(grepl("Wk",Time_Point),"WkPost",Time_Point),
+                Time_Point = Time_simp,
+                Time_simp = NULL,
+                ### also make group with all caps
+                group = toupper(Group)) %>%
+  ## make wider
+  unique() %>%
+  ## remove duplicate rows with NA + number
+  dplyr::group_by(Sample_ID,Group, group,TOA,Time_Point,variable) %>%
+  dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+  ## TRIM TO ONLY vars of interest
+  dplyr::filter(variable %in% assays_to_use) %>%
+  tidyr::pivot_wider(names_from = "variable",values_from = "value") %>%
+    ### remove rows with all missing 
+  dplyr::filter_at(vars(assays_to_use), any_vars(!is.na(.))) 
+
+
+### save values used to list_of_plotted
+list_of_plotted[[paste0(fig_name_to_use)]] <- curr_phen %>%
+  dplyr::arrange(group,Sample_ID) %>%
+  ## remove duplicate Group
+  dplyr::select(-Group)
+
+
+```
+
+```{r MW_2group_other}
+#Mann-Whitney/Wilcoxon test between groups at each timepoint
+#### get data into true wide format
+## rows = animals (+ group and any metadata variables that are intrinsic (i.e. don't change with time) to the animal)
+## columns = variables + time
+group_levels <- c("Alum","ALFQA")
+
+data_wide <- data_long %>%
+  ### combine variable + time 
+  dplyr::mutate(var_time = paste0(variable,"__",Time_Point),
+                ## remove variable and time
+                variable = NULL, 
+                Time_Point = NULL) %>%
+  ### make wider
+  tidyr::pivot_wider(names_from = "var_time", values_from = "value") %>%
+  ### factorize group
+  dplyr::mutate(Group_f = factor(Group, group_levels),
+                ## also make rownames be animal
+                rowname = Sample_ID) %>%
+  column_to_rownames()
+
+
+###### trim to only variables with some variation (i.e. if all animals == 0 then removed)
+data_trim <- data_wide %>%
+  dplyr::select(where(~n_distinct(.) > 1))
+
+
+        ### trim to only the variables with data for both groups (removes if all NA in one group, even if there is data in the other group because will have nothing to compare to)
+        trim_df1 <- data_trim[which(data_trim$Group_f == group_levels[1]),] #%>% dplyr::select(-Group_f)
+        columns_with_noNAs1 <- colnames(trim_df1)[which(colSums(is.na(trim_df1)) == 0)]
+        columns_with_someNAs1 <- colnames(trim_df1)[which(colSums(is.na(trim_df1)) > 0 & colSums(is.na(trim_df1)) < dim(trim_df1)[1])]
+        columns_with_allNAs1 <- colnames(trim_df1)[which(colSums(is.na(trim_df1)) == dim(trim_df1)[1])]
+   
+        
+        trim_df2 <- data_trim[which(data_trim$Group_f == group_levels[2]),] #%>% dplyr::select(-Group_f)
+        columns_with_noNAs2 <- colnames(trim_df2)[which(colSums(is.na(trim_df2)) == 0)]
+        columns_with_someNAs2 <- colnames(trim_df2)[which(colSums(is.na(trim_df2)) > 0 & colSums(is.na(trim_df2)) < dim(trim_df2)[1])]
+        columns_with_allNAs2 <- colnames(trim_df2)[which(colSums(is.na(trim_df2)) == dim(trim_df2)[1])]
+
+
+
+        
+      new_curr_df <- data_trim[,intersect(c(columns_with_noNAs1,columns_with_someNAs1),c(columns_with_noNAs2,columns_with_someNAs2))] 
+      
+      
+        ## generate matrix with only variables that you want to test (no character variables and nothing that has zero variation across all animals)
+      Assay_mat <- data.matrix(new_curr_df %>%
+                               dplyr::select(-c(Sample_ID,Group,Group_f,TOA)))
+      
+      
+          curr_p_raw <- apply(Assay_mat, 2, function(x) wilcox.test(x ~ Group_f, data = new_curr_df)$p.value)
+          curr_p_adj <- p.adjust(curr_p_raw, method = 'BH') 
+          # curr_est <- apply(new_Assay_mat, 2, function(x) wilcox.test(x[Group_f %in% c(
+          #    groups_to_compare$group1[g], groups_to_compare$group2[g])] ~ Group_f[Group_f %in% c(
+          #      groups_to_compare$group1[g], groups_to_compare$group2[g])], data = new_curr_df, conf.int = TRUE)$estimate)
+          
+          ###### first define function
+          hl <- function(x, y = NULL) {
+            if (is.null(y)) {
+              walsh <- outer(x, x, "+") / 2
+              median(walsh[lower.tri(walsh, diag = TRUE)], na.rm = TRUE)
+            } else {
+              median(outer(x, y, "-"), na.rm = TRUE)
+            }
+          }
+          
+          #### then generate the vector
+          curr_est <- c()
+          for(i in colnames(Assay_mat)){
+            ### x vs y so positive would mean up in x
+            x <- new_curr_df[which(new_curr_df$Group_f == group_levels[2]),i]
+            y <- new_curr_df[which(new_curr_df$Group_f == group_levels[1]),i]
+            ce <- hl(x, y)
+            names(ce) <- i
+            curr_est <- c(curr_est,ce)
+          }
+          
+          
+          #### combine to df
+          
+          curr_p_df <- data.frame(curr_p_raw, curr_p_adj, curr_est) %>%
+            rownames_to_column() 
+          colnames(curr_p_df) <- c("rowname",
+                                   
+                                   paste0("p_raw"),
+                                   paste0("p_adj"),
+                                   paste0("est"))
+
+        
+        
+        #### add to stats list
+        list_of_stats[[paste0(fig_name_to_use,"_MW_2group")]] <- curr_p_df
+
+
+```
+
+
+```{r AssociationWithTOA_prep___other}
+ cor_method <- "spearman" ### "spearman", "pearson"
+  corr_vsOther_vars <- c("TOA") ### specify which non-olink variables you would like to correlate with the olink variables
+
+  corr_group_var_names <- c("ALUM","ALFQA") ### these are are as in the spreadsheet, specify which values of the grouping variable you'd like to run corrplots for
+ corr_timepoints <- c("WkPost","Change")
+  
+  ### suffix to name for output tab
+  short_name_to_use <- "vsTOA"
+  
+corr_vsOther_pval <- 0.05 ## pvalue for annotation with stars & trimming of corrplot
+
+
+```
+
+
+```{r AssociationWithOther, results='asis', fig.width=7, fig.height=6}
+#### prep dataframe to collect R and p
+cor_df <- data.frame("rowname"=assays_to_use)
+
+##### separately for each group and timepoint
+for(curr_time in corr_timepoints){
+  
+  # cat("### ",paste0(curr_time," {.tabset}"),"\n")
+  # cat('\n')
+  
+          ## list to collect for alluvials
+   list_for_alluvial <- list()
+
+   for(curr_group in corr_group_var_names){
+    
+    # cat("#### ",paste0(curr_group," {.tabset}"),"\n")
+    # cat('\n')
+    # 
+    ### wide with columns = assays/variables for corr, rows = animals
+    curr_df_trim <- curr_phen %>%
+      ### trim to only samples in this timepoint and group
+      dplyr::filter(Time_Point %in% curr_time & group %in% curr_group) %>%
+      ### select only the olink columns and the TAO 
+      dplyr::select(all_of(intersect(c(assays_to_use,corr_vsOther_vars,"Sample_ID"), colnames(.)))) %>%
+      
+      filter_all(any_vars(!is.na(.))) %>% ### removes NA rows (unnecessary)
+      select(where(function(x) !all(is.na(x)))) ### removes NA columns, as these might be specific per group
+    
+
+    
+    ### set name
+    set_name <- paste0(curr_group,"__",curr_time)
+    
+    ### run correlations - saves cor mat, raw p mat
+    
+     curr_columns_for_corr <- intersect(colnames(curr_df_trim),assays_to_use)
+  curr_other_columns_for_corr <- intersect(corr_vsOther_vars,colnames(curr_df_trim))
+  
+  #### only if have other columns
+  if(length(curr_other_columns_for_corr) > 0 & length(curr_columns_for_corr) > 0){
+    
+    
+ ## generate cor matrix 
+  if(length(corr_vsOther_vars) == 1){
+    otherVar_df <- data.frame(as.numeric(data.frame(curr_df_trim)[,corr_vsOther_vars])) 
+    colnames(otherVar_df) <- corr_vsOther_vars
+      cor_mat <- cor(as.matrix(curr_df_trim[,curr_columns_for_corr]), as.matrix(otherVar_df), method = cor_method, use="pa")
+  }else{
+      cor_mat <- cor(as.matrix(data.frame(curr_df_trim)[,curr_columns_for_corr]), as.matrix(curr_df_trim[,curr_other_columns_for_corr]), method = cor_method, use="pa")
+    
+  }
+  
+
+  ## raw p
+  cor_test_mat <- data.frame(matrix(NA, nrow=length(curr_columns_for_corr), ncol=length(curr_other_columns_for_corr)))
+  rownames(cor_test_mat) <- curr_columns_for_corr
+  colnames(cor_test_mat) <- curr_other_columns_for_corr
+  
+  for(curr1 in curr_columns_for_corr) {
+    for(curr2 in intersect(corr_vsOther_vars,colnames(curr_df_trim))) {
+      
+      #### only if have non-NAs for at least 3 animals
+      animals_withBoth <- curr_df_trim[,c(curr1,curr2)] %>%
+        dplyr::filter(!is.na(!!rlang::sym(curr1)) & !is.na(!!rlang::sym(curr2)))
+      
+      if(dim(animals_withBoth)[1] > 0){
+              cor_test_mat[curr1, curr2] <- 
+        cor.test(as.matrix(data.frame(curr_df_trim)[,curr1]), 
+                 as.matrix(as.numeric(data.frame(curr_df_trim)[,curr2])), 
+                 method = cor_method, use="pa")$p.value
+
+      }else{
+              cor_test_mat[curr1, curr2] <- NA
+
+      }
+      
+    }
+  }
+  
+ ## adj p for multiple comparisons by BH over assays
+  cor_test_adj_mat <- cor_test_mat #duplicate dataframe to replace values
+  for(curr_assay in curr_columns_for_corr) {
+    cor_test_adj_mat[curr_assay,] <- p.adjust(cor_test_mat[curr_assay,], method = "BH")
+  }
+
+
+ 
+    ### save cor_mat, cor_test_mat to combo df
+    cor_df <- cor_df %>%
+      dplyr::left_join(data.frame(cor_mat) %>%
+                         ### rename to have the set name as column name
+                         `colnames<-`(c(paste0(colnames(.),"_",set_name,"_R"))) %>%
+                         rownames_to_column(),
+                       by = "rowname") %>%
+      dplyr::left_join(data.frame(cor_test_mat) %>%
+                         ### rename to have the set name as column name
+                         `colnames<-`(c(paste0(colnames(.),"_",set_name,"_p"))) %>%
+                         rownames_to_column(),
+                       by = "rowname")
+    
+    
+    
+    
+    #### generate long to get number of sig pairs
+    curr_Rp <- data.frame(cor_mat) %>%
+      ### rename to have the set name as column name
+      `colnames<-`(c(paste0(colnames(.),"_",set_name,"_R"))) %>%
+      rownames_to_column() %>%
+      dplyr::left_join(data.frame(cor_test_mat) %>%
+                         ### rename to have the set name as column name
+                         `colnames<-`(c(paste0(colnames(.),"_",set_name,"_p"))) %>%
+                         rownames_to_column(),
+                       by = "rowname") %>%
+      tidyr::pivot_longer(!rowname, names_to = "assay_group_tp_stat", values_to = "value") %>% 
+      dplyr::mutate(stat = str_after_last(assay_group_tp_stat,"_"), 
+                    assay_group_tp = str_before_last(assay_group_tp_stat,"_"), 
+                    assay_group_tp_stat = NULL) %>%
+      tidyr::pivot_wider(names_from = "stat", values_from = "value") %>%
+      ### remove self associations
+      dplyr::filter(rowname != str_before_first(assay_group_tp,paste0("_",curr_group)))
+    
+    list_for_alluvial[[paste0(curr_group)]] <- curr_Rp  
+    
+    
+    trim_pval_level <- corr_vsOther_pval
+    
+  }else{
+    
+  }
+     
+    
+    
+  }
+  cat("\n")
+  cat(' \n \n') ### this is the key!
+  
+  
+  
+ 
+    
+    cat("\n")
+    cat(' \n \n') ### this is the key!
+    
+}
+  cat("\n")
+    cat(' \n \n') ### this is the key!
+ 
+    
+    corVSTOA_df_prep <- cor_df %>% 
+      tidyr::pivot_longer(!rowname, names_to = "assay_group_tp_stat", values_to = "value") %>% 
+      dplyr::mutate(stat = str_after_last(assay_group_tp_stat,"_"), 
+                    assay_group_tp = str_before_last(assay_group_tp_stat,"_"), 
+                    assay_group = str_before_last(assay_group_tp,"__"),
+                    tp1 = str_after_last(assay_group_tp,"__"),
+                    assay2 = str_before_last(assay_group,"_"),
+                    AnimalsFrom = str_after_last(assay_group,"_"),
+                    assay1 = paste0(rowname,"__",tp1)) %>%
+      dplyr::select(-c(assay_group_tp_stat,assay_group_tp,assay_group,tp1,rowname)) %>% 
+      dplyr::relocate(assay1,assay2,AnimalsFrom) %>%
+      tidyr::pivot_wider(names_from = "stat", values_from = "value") %>%
+      ### remove rows without R and p
+      dplyr::filter(!is.na(R)) %>%
+  ### make wider
+  tidyr::pivot_wider(names_from = "AnimalsFrom", values_from = c("R","p"))
+    
+    
+    ######### save to stats if not 6a (since will get saved as supp 7a)
+    if(fig_name_to_use != "Fig6a"){
+      list_of_stats[[paste0(fig_name_to_use,"_",short_name_to_use)]]  <- corVSTOA_df_prep
+    }
+    
+```
+
+
+```{r AssociationVsSelf_prep}
+corr_timepoints <- list("WkPostAndChange"=c("WkPost","Change"))
+corr_pval_cut <- 0.05 ## pvalue for trimming corrplot no quotes
+```
+
+```{r AssociationVsSelf, results='asis', fig.width=9, fig.height=9}
+
+######## setup
+cor_method <- "spearman" ### "spearman", "pearson"
+
+  corr_group_var_names <- c("ALUM","ALFQA") ### these are are as in the spreadsheet, specify which values of the grouping variable you'd like to run corrplots for
+    
+  ### suffix to name for output tab
+  short_name_to_use <- "vsSelf"
+
+  
+
+#### prep dataframe to collect R and p
+cor_combo_df <- data.frame()
+
+#### prep df to  collect trim stats
+trim_stats_df <- data.frame()
+
+
+
+##### separately for each group and timepoint
+for(curr_time in names(corr_timepoints)){
+    
+      cat("#### ",paste0(curr_time," {.tabset}"),"\n")
+      cat('\n')
+
+    
+    
+         ## list to collect for alluvials
+   list_for_alluvial <- list()
+ for(curr_group in corr_group_var_names){
+   
+
+   
+      cat("##### ",paste0(curr_group," {.tabset}"),"\n")
+      cat('\n')
+      
+      ### if both
+      if(grepl("And",curr_time)){
+           ### wide with columns = assays/variables for corr, rows = animals
+      curr_df_trim <- curr_phen %>%
+        ### trim to only samples in this timepoint and group
+        dplyr::filter(Time_Point %in% corr_timepoints[[curr_time]] & group %in% curr_group) %>%
+                ### select only the assays_to_use
+        dplyr::select(all_of(intersect(c(assays_to_use,"Sample_ID","Time_Point"), colnames(.)))) %>%
+                ### add tp to variable name
+        ### first make longer
+        tidyr::pivot_longer(cols = all_of(assays_to_use), names_to = "variable", values_to = "value") %>%
+        ####### remove ADCP ADNP and trogo WkPost
+        dplyr::mutate(helper = ifelse(grepl(paste(c("ADCP","ADNP","Trogo"),collapse = '|'),variable) & Time_Point == "WkPost",
+                                      "cut","keep")) %>%
+        dplyr::filter(helper == "keep") %>%
+        dplyr::mutate(variable =paste0(variable,"_",Time_Point),
+                      Time_Point = NULL,
+                      helper = NULL) %>%
+        ### make wider again
+        tidyr::pivot_wider(names_from = "variable", values_from = "value") %>%
+
+
+             filter_all(any_vars(!is.na(.))) %>% ### removes NA rows (unnecessary)
+             select(where(function(x) !all(is.na(x)))) ### removes NA columns, as these might be specific per group
+      
+
+      }else{
+      
+      ### wide with columns = assays/variables for corr, rows = animals
+      curr_df_trim <- curr_phen %>%
+        ### trim to only samples in this timepoint and group
+        dplyr::filter(Time_Point %in% corr_timepoints[[curr_time]] & group %in% curr_group) %>%
+                ### select only the assays_to_use
+        dplyr::select(all_of(intersect(c(assays_to_use,"Sample_ID"), colnames(.)))) %>%
+
+             filter_all(any_vars(!is.na(.))) %>% ### removes NA rows (unnecessary)
+             select(where(function(x) !all(is.na(x)))) ### removes NA columns, as these might be specific per group
+      }
+
+
+      ### set name
+      set_name <- paste0(curr_group,"__",curr_time)
+      curr_assays_to_use <- setdiff(colnames(curr_df_trim),c("Sample_ID","TOA"))
+      
+      ### run correlations - saves cor mat, raw p mat
+     curr_columns_for_corr <- intersect(colnames(curr_df_trim),curr_assays_to_use)
+ ## generate cor matrix 
+
+      cor_mat <- cor(as.matrix(data.frame(curr_df_trim)[,curr_columns_for_corr]), method = cor_method, use="pa")
+    
+
+  ## raw p
+  cor_test_mat <- data.frame(matrix(NA, nrow=length(curr_columns_for_corr), ncol=length(curr_columns_for_corr)))
+  rownames(cor_test_mat) <- curr_columns_for_corr
+  colnames(cor_test_mat) <- curr_columns_for_corr
+  
+  for(curr1 in curr_columns_for_corr) {
+    for(curr2 in curr_columns_for_corr) {
+      
+      if(curr1 != curr2){
+             #### only if have non-NAs for at least 3 animals
+      animals_withBoth <- curr_df_trim[,c(curr1,curr2)] %>%
+        dplyr::filter(!is.na(!!rlang::sym(curr1)) & !is.na(!!rlang::sym(curr2)))
+
+      }else{
+        ### for diagonal make dummy helper df
+        animals_withBoth <- data.frame(matrix(nrow=2))
+      }
+ 
+      if(dim(animals_withBoth)[1] > 0){
+              cor_test_mat[curr1, curr2] <- 
+        cor.test(as.matrix(data.frame(curr_df_trim)[,curr1]), 
+                 as.matrix(data.frame(curr_df_trim)[,curr2]), 
+                 method = cor_method, use="pa")$p.value
+
+      }else{
+              cor_test_mat[curr1, curr2] <- NA
+
+      }
+      
+    }
+  }
+  
+ ## adj p for multiple comparisons by BH over assays
+  cor_test_adj_mat <- cor_test_mat #duplicate dataframe to replace values
+  for(curr_assay in curr_columns_for_corr) {
+    cor_test_adj_mat[curr_assay,] <- p.adjust(cor_test_mat[curr_assay,], method = "BH")
+  }
+
+
+
+#### generate long to get number of sig pairs
+  curr_Rp <- data.frame(cor_mat) %>%
+                               ### rename to have the set name as column name
+                               `colnames<-`(c(paste0(colnames(.),"_",set_name,"_R"))) %>%
+                               rownames_to_column() %>%
+    dplyr::left_join(data.frame(cor_test_mat) %>%
+                               ### rename to have the set name as column name
+                               `colnames<-`(c(paste0(colnames(.),"_",set_name,"_p"))) %>%
+                               rownames_to_column(),
+                     by = "rowname") %>%
+    tidyr::pivot_longer(!rowname, names_to = "assay_group_tp_stat", values_to = "value") %>% 
+      dplyr::mutate(stat = str_after_last(assay_group_tp_stat,"_"), 
+                    assay_group_tp = str_before_last(assay_group_tp_stat,"_"), 
+                    assay_group_tp_stat = NULL) %>%
+    tidyr::pivot_wider(names_from = "stat", values_from = "value") %>%
+    ### remove self associations
+    dplyr::filter(rowname != str_before_first(assay_group_tp,paste0("_",curr_group)))
+  
+  list_for_alluvial[[paste0(curr_group)]] <- curr_Rp  
+  
+
+    ### save cor_mat, cor_test_mat to combo df
+  cor_combo_df <- rbind(cor_combo_df,curr_Rp)
+
+      
+      trim_pval_level <- corr_pval_cut
+
+      cat("\n")
+      cat(' \n \n') ### this is the key!
+      
+      ### paste number of pairs - needs to be divided by 2 to remove the duplicates
+            cat(" ",paste0(length(which(curr_Rp$p < trim_pval_level & curr_Rp$R > 0))/2,
+                           " up and ",
+                           length(which(curr_Rp$p < trim_pval_level & curr_Rp$R < 0))/2,
+                           " down pairs with p < ",trim_pval_level),"\n")
+      cat('\n')
+         
+      
+      cat("\n")
+      cat(' \n \n') ### this is the key!
+      
+      ########## print table trimmed
+      
+  
+      
+ to_print_prep <-  curr_Rp %>%
+   ## trim to p cut
+   dplyr::filter(p < trim_pval_level) %>%
+   ### remove group & tp
+   dplyr::mutate(assay2 = str_remove_all(assay_group_tp, paste0("_",curr_group,"__",curr_time)),
+                 assay_group_tp = NULL) %>%
+   dplyr::rename(assay1=rowname, spearman_R=R, spearman_p=p) %>%
+   dplyr::relocate(assay1, assay2) %>%
+   ### remove inverse dups
+   group_by(grp = paste(pmax(assay1, assay2), pmin(assay1, assay2), sep = "_")) %>%
+ dplyr::filter(row_number() == 1) %>%
+ ungroup() %>%
+ dplyr::select(-grp) %>%
+   ## add time to olink
+   dplyr::mutate(assay1 = ifelse(grepl("_",assay1),
+                                 assay1,
+                                 paste0(assay1,"_",curr_time)),
+                 assay2 = ifelse(grepl("_",assay2),
+                                 assay1,
+                                 paste0(assay2,"_",curr_time))) %>%
+   #### add MW dir for each assay
+   dplyr::left_join(list_of_stats[[paste0(fig_name_to_use,"_MW_2group")]] %>%
+                      ## remove __ and make Wk generic
+                      dplyr::mutate(rowname = ifelse(grepl("Wk",rowname),
+                                                     paste0(str_before_last(rowname,"Wk"),"WkPost"),
+                                                     rowname),
+                                    rowname = str_replace_all(rowname,"__","_"),
+                                    assay1_MW_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(rowname,assay1_MW_dir) %>%
+                      ### rename rowname to assay1
+                      dplyr::rename(assay1=rowname),
+                    by = "assay1") %>%
+      dplyr::left_join(list_of_stats[[paste0(fig_name_to_use,"_MW_2group")]] %>%
+                      ## remove __ and make Wk generic
+                      dplyr::mutate(rowname = ifelse(grepl("Wk",rowname),
+                                                     paste0(str_before_last(rowname,"Wk"),"WkPost"),
+                                                     rowname),
+                                    rowname = str_replace_all(rowname,"__","_"),
+                                    assay2_MW_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(rowname,assay2_MW_dir) %>%
+                      ### rename rowname to assay1
+                      dplyr::rename(assay2=rowname),
+                    by = "assay2") 
+ 
+ ####### if have TOA for this group
+ if(length(which(grepl(curr_group,colnames(list_of_stats[[paste0(fig_name_to_use,"_vsTOA")]])) == TRUE)) > 0) {
+   to_print_prep2 <- to_print_prep %>%
+   #### add vsTOA for each assay
+      dplyr::left_join(list_of_stats[[paste0(fig_name_to_use,"_vsTOA")]] %>%
+                         ### trim to only this group
+                         dplyr::select(assay1,!!!rlang::syms(colnames(.)[grepl(curr_group,colnames(.))])) %>%
+                         ### make colnames generic
+                         `colnames<-`(c(str_remove_all(colnames(.),curr_group))) %>%
+                      ## remove __ 
+                      dplyr::mutate(assay1 = str_replace_all(assay1,"__","_"),
+                                    assay1_vsTOA_dir = ifelse(p_ < 0.05,
+                                                    ifelse(R_ > 0,
+                                                           "pos",
+                                                           "neg"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay1,assay1_vsTOA_dir),
+                    by = "assay1") %>%
+    dplyr::left_join(list_of_stats[[paste0(fig_name_to_use,"_vsTOA")]] %>%
+                         ### trim to only this group
+                         dplyr::select(assay1,!!!rlang::syms(colnames(.)[grepl(curr_group,colnames(.))])) %>%
+                         ### make colnames generic
+                         `colnames<-`(c(str_remove_all(colnames(.),curr_group))) %>%
+                      ## remove __ 
+                      dplyr::mutate(assay2 = str_replace_all(assay1,"__","_"),
+                                    assay2_vsTOA_dir = ifelse(p_ < 0.05,
+                                                    ifelse(R_ > 0,
+                                                           "pos",
+                                                           "neg"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay2,assay2_vsTOA_dir),
+                    by = "assay2") 
+   
+   #### save to plotted
+   trim_stats_df <- rbind(trim_stats_df, to_print_prep2 %>%
+                            ### add group
+                            dplyr::mutate(group = paste0(curr_group)) %>%
+                            dplyr::relocate(group)
+   )
+   
+   
+
+   
+  to_print <- to_print_prep2 %>%
+   
+     DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 50,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+   print(htmltools::tagList(to_print))
+
+        cat("\n")
+      cat(' \n \n') ### this is the key!
+      
+ }else{
+   
+   to_print_prep2 <- to_print_prep %>%
+     ### add dummy columns
+     dplyr::mutate(assay1_vsTOA_dir = "not_available",
+                   assay2_vsTOA_dir = "not_available")
+     
+   
+    #### save to plotted
+   trim_stats_df <- rbind(trim_stats_df, to_print_prep2 %>%
+                            ### add group
+                            dplyr::mutate(group = paste0(curr_group)) %>%
+                            dplyr::relocate(group)
+   )
+   
+  
+   to_print <- to_print_prep %>%
+      DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 50,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+   print(htmltools::tagList(to_print))
+ }
+    
+      
+      
+    }
+    cat("\n")
+    cat(' \n \n') ### this is the key!
+    
+    
+        
+   ########### now alluvial
+    
+   # for(curr_trim_level in c(0.05, 0.01, 0.001)){
+     curr_trim_level <- corr_pval_cut
+    
+        cat("##### ",paste0(" alluvial (",curr_trim_level,") "),"\n")
+      cat('\n')
+  
+        df_for_alluvial_prep <-  list_for_alluvial[["ALUM"]] %>%
+                    ### add in the ALFQA
+          dplyr::full_join(list_for_alluvial[["ALFQA"]], by = colnames(.)) %>%
+          ### remove rows without R and p
+      dplyr::filter(!is.na(R))  %>%
+          ### separate off timepoint and group
+          dplyr::mutate(assay2 = str_before_last(str_before_last(assay_group_tp,"__"),"_"),
+                        group = str_after_last(str_before_last(assay_group_tp,"__"),"_"),
+                        assay_group_tp = NULL) %>%
+          dplyr::rename(assay1 = rowname) %>%
+          dplyr::relocate(assay1, assay2, group) %>%
+          ### make wider combining group/stat
+          tidyr::pivot_longer(cols = c(R,p), names_to = "stat", values_to = "value") %>%
+          dplyr::mutate(group_stat = paste0(group,"_",stat),
+                        group = NULL,
+                        stat = NULL) %>%
+          tidyr::pivot_wider(names_from = "group_stat", values_from = "value")  %>%
+          ### add dir
+          dplyr::mutate(ALFQA_dir = ifelse(ALFQA_p < curr_trim_level,
+                                            ifelse(ALFQA_R > 0, "pos","neg"),
+                                           "not_sig"),
+                        ALUM_dir = ifelse(is.na(ALUM_p),"no_test",
+                                          ifelse(ALUM_p < curr_trim_level,
+                                            ifelse(ALUM_R > 0, "pos","neg"),
+                                           "not_sig"))) %>%
+    ## remove inverse duplicates
+ group_by(grp = paste(pmax(assay1, assay2), pmin(assay1, assay2), sep = "_")) %>%
+ dplyr::filter(row_number() == 1) %>%
+ ungroup() %>%
+ dplyr::select(-grp) %>%
+  ### remove not_sig in both, and no_test since can't compare ALFQA/ALUM
+  dplyr::mutate(helper = paste0(ALFQA_dir,"_",ALUM_dir)) %>%
+  dplyr::filter(helper != "not_sig_not_sig") %>%
+  dplyr::filter(ALUM_dir != "no_test") %>%
+  ### also remove unneeded columns
+  dplyr::select(-c(contains("_R"),contains("_p"),helper)) %>%
+  ##make longer
+  tidyr::pivot_longer(cols = c(ALFQA_dir,ALUM_dir), names_to = "group", values_to = "dir") %>%
+  dplyr::mutate(group = str_remove_all(group,"_dir"),
+                assay_only1 = str_before_last(assay1,"_"),
+                assay_only2 = str_before_last(assay2,"_"),
+                assay_pair = paste0(assay1,"__vs__",assay2))
+        
+        #### for WkPost AND chang
+        if(grepl("And",curr_time)){
+          df_for_alluvial <- df_for_alluvial_prep %>%
+              ### remove associations between wkpost and change of same assay
+  dplyr::filter(assay_only1 != assay_only2) %>%
+  ## factorize
+  dplyr::mutate(assay_pair_f = factor(assay_pair),
+                group_f = factor(group, c("ALFQA","ALUM")),
+                dir_f = factor(dir, c("pos","not_sig","neg"))) %>%
+  dplyr::arrange(group_f, dir_f, assay_pair_f)
+
+                        
+
+            
+        }else{
+           df_for_alluvial <- df_for_alluvial_prep %>%
+
+  ## factorize
+  dplyr::mutate(assay_pair_f = factor(assay_pair),
+                group_f = factor(group, c("ALFQA","ALUM")),
+                dir_f = factor(dir, c("pos","not_sig","neg"))) %>%
+  dplyr::arrange(group_f, dir_f, assay_pair_f)
+
+                        
+
+        }
+        
+        
+
+
+### set up colors
+color_df <- data.frame("group"=unique(levels(df_for_alluvial$dir_f)),
+                       "color"=c("purple","grey","orange"))
+
+
+
+ 
+gg <- ggplot(df_for_alluvial,
+             aes(x = group_f, stratum = dir_f, alluvium = assay_pair_f))+
+  stat_alluvium(aes(fill = dir_f), width = 1/2, alpha = 1/2,) +
+  stat_stratum(aes(stratum = dir_f, fill = dir_f), width = 1/2) +
+  scale_fill_manual(values = color_df$color)+
+  stat_alluvium(geom = "text", aes(label = assay_pair_f), color = "black", size = 1.5, show.legend = FALSE) + ## to label NA category
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank())
+plot(gg)
+
+
+cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+
+    }
+    cat("\n")
+cat(' \n \n') ### this is the key!
+
+
+###### save correlation stats
+list_of_stats[[paste0(fig_name_to_use,"_",short_name_to_use)]] <- cor_combo_df %>%
+  ### make longer
+  tidyr::pivot_longer(!c(rowname,assay_group_tp), names_to = "stat", values_to = "value") %>%
+  ## break apart assay group time stat
+  dplyr::rename(assay1 = rowname) %>%
+  dplyr::mutate(assay2_group = str_before_last(assay_group_tp,"__"),
+                tp = str_after_last(assay_group_tp,"__"),
+                assay2 = str_before_last(assay2_group,"_"),
+                group_stat = paste0(str_after_last(assay2_group,"_"),"_",stat),
+                assay_group_tp = NULL,
+                assay2_group = NULL,
+                stat = NULL) %>%
+  ### make wider
+  tidyr::pivot_wider(names_from = "group_stat", values_from = "value")
+
+
+#### save to plotted
+
+   list_of_plotted[[paste0(fig_name_to_use,"_trimStats")]] <- trim_stats_df %>%
+     dplyr::arrange(group, assay1, assay2)
+
+```
+
+
+
+
+
+
+## Supp Figure 2 (Functional Assays in Blood) {.tabset}
+
+```{r scatterVsGroupSetup___SuppFig2abcdefhi}
+composite_fig_name <- "SuppFig2abcdefhi"
+scatter_df <- data.frame("name"=c("SuppFig2a",
+                                  "SuppFig2b",
+                                  "SuppFig2c",
+                                  "SuppFig2d",
+                                  "SuppFig2e",
+                                  "SuppFig2f",
+                                  "SuppFig2h",
+                                  "SuppFig2i"),
+                         "y"=c("Plasma_gp120_antibody_titers__WkPost",
+                               "Plasma_AvidityScore_dV1M766gp120__WkPost",
+                               "Plasma_AvidityScore_cV2gp120__WkPost",
+                               "Plasma_ADCC_Titer__WkPost",
+                               "Plasma_ADCC_Killing__WkPost",
+                               "Plasma_V2specific_ADCC_Killing__WkPost",
+                               "Plasma_Trogocytosis_WTgp120__Change",
+                               "Plasma_ADCP_SIVgp120WT__Change"),
+                         "trans_y"=c("log10",
+                                     "log10",
+                                     "log10",
+                                     "log10",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other"))
+
+fill_colors_to_use <- c(ALFQA="red",Alum="blue")
+outline_colors_to_use <- c("black","black")
+
+```
+
+```{r scatterplotsVsGroupPlot___SuppFig2abcdefhi, ref.label=c('scatterplotsVsGroupPlot'), results='asis', fig.height=3, fig.width=4}
+```
+
+
+
+```{r scatterVsOtherSetup___SuppFig2gjkl}
+composite_fig_name <- "SuppFig2gjkl"
+
+scatter_df <- data.frame("name"=c("SuppFig2g",
+                                  "SuppFig2j",
+                                  "SuppFig2k",
+                                  "SuppFig2l"),
+                         "x"=c("Plasma_ADCC_Killing__WkPost",
+                               "Plasma_ADCP_SIVgp120dV1__Change",
+                               "Plasma_Trogocytosis_dV1gp120__Change",
+                               "Plasma_AvidityScore_dV1M766gp120__WkPost"),
+                         "trans_x"=c("identity",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "y"=c("Plasma_gp120_antibody_titers__WkPost",
+                               "Plasma_ADNP_SIVgp120dV1__Change",
+                               "Plasma_ADNP_SIVgp120dV1__Change",
+                               "Plasma_ADNP_SIVgp120dV1__Change"),
+                         "trans_y"=c("log10",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other",
+                                     "other",
+                                     "other"))
+
+```
+
+```{r scatterplotsVsOtherPlot___SuppFig2gjkl, ref.label=c('scatterplotsVsOtherPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+
+
+
+## Figure 3 (RM) {.tabset}
+
+
+```{r scatterVsGroupSetup___Fig3aeh}
+composite_fig_name <- "Fig3aeh"
+scatter_df <- data.frame("name"=c("Fig3a",
+                                  "Fig3e",
+                                  "Fig3h"),
+                         "y"=c("RectMucosa_CD73posCD163posMacrophages__Change",
+                               "RectMucosa_NKp44__Change",
+                               "RectMucosa_NKp44negNKG2Aneg_PMA_IFNg__Change"),
+                         "trans_y"=c("identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other",
+                                     "other"))
+
+fill_colors_to_use <- c(ALFQA="red",Alum="blue")
+outline_colors_to_use <- c("black","black")
+
+```
+
+```{r scatterplotsVsGroupPlot___Fig3aeh, ref.label=c('scatterplotsVsGroupPlot'), results='asis', fig.height=3, fig.width=4}
+```
+
+
+
+
+```{r scatterVsOtherSetup___Fig3b}
+composite_fig_name <- ""
+scatter_df <- data.frame("name"=c("Fig3b"),
+                         "x"=c("PBMCs_PctCD14_efferocytes__WkPost"),
+                         "trans_x"=c("identity"),
+                         "y"=c("RectMucosa_CD73posCD163posMacrophages__Change"),
+                         "trans_y"=c("identity"),
+                         "dataset"=c("other"))
+
+```
+
+```{r scatterplotsVsOtherPlot___Fig3b, ref.label=c('scatterplotsVsOtherPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+
+
+```{r scatterVsTOASetup___Fig3cfg}
+composite_fig_name <- "Fig3cfg"
+scatter_df <- data.frame("name"=c("Fig3c",
+                                  "Fig3f",
+                                  "Fig3g"),
+                         "y"=c("RectMucosa_DC10__Change",
+                               "RectMucosa_NKp44__Change",
+                               "RectMucosa_NKp44_IL17_gp120_stimulated__Change"),
+                         "trans_y"=c("identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other",
+                                     "other"))
+
+```
+
+```{r scatterplotsVsTOAPlot___Fig3cfg, ref.label=c('scatterplotsVsTOAPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+
+
+
+
+```{r scatterVsGroupSetup___Fig3di}
+composite_fig_name <- "Fig3di"
+scatter_df <- data.frame("name"=c("Fig3d",
+                                  "Fig3i"),
+                         "y"=c("Pct_CD73pos_CD163pos_macrophages__Rectal_mucosa__week_13",
+                               "Pct_NKp44pos_ILCs_Rectal_mucosa__week_13"),
+                         "trans_y"=c("identity",
+                                     "identity"),
+                         "dataset"=c("otherStudy",
+                                     "otherStudy"))
+
+
+fill_colors_to_use <- c("white","white")
+outline_colors_to_use <- c(ALFQA="red",Alum="blue")
+
+```
+
+```{r scatterplotsVsGroupPlot___Fig3di, ref.label=c('scatterplotsVsGroupPlot'), results='asis', fig.height=3, fig.width=4}
+```
+
+
+
+```{r setup___Fig3j}
+fig_name_to_use <- "Fig3j"
+assays_to_use <- sort(unique(data_long$variable)[grepl("RectMucosa", unique(data_long$variable))])
+corr_timepoints <- list("WkPostAndChange"=c("WkPost","Change"))
+corr_pval_cut <- 0.05 ## pvalue for trimming corrplot no quotes
+```
+
+### `r paste0(fig_name_to_use)` {.tabset}
+
+```{r setSamples_other___Fig3j, ref.label=c('setSamples_other')}
+```
+
+```{r MW_2group_other___Fig3j, ref.label=c('MW_2group_other')}
+```
+
+```{r AssociationWithTOA_prep___other___Fig3j, ref.label=c('AssociationWithTOA_prep___other')}
+```
+
+```{r AssociationWithTOA___Fig3j, ref.label=c('AssociationWithOther'), results='asis', fig.width=7, fig.height=6}
+```
+
+```{r AssociationVsSelf_prep___Fig3j, ref.label=c('AssociationVsSelf_prep')}
+```
+
+```{r AssociationVsSelf___Fig3j, ref.label=c('AssociationVsSelf'), results='asis', fig.width=9, fig.height=9}
+```
+
+
+
+
+## Supp Figure 3 (FACS scheme)
+
+FACS scheme
+
+
+
+
+
+## Supp Figure 4 (RM) {.tabset}
+
+```{r scatterVsGroupSetup___SuppFig4bdehi}
+composite_fig_name <- "SuppFig4bdehi"
+scatter_df <- data.frame("name"=c("SuppFig4b",
+                                  "SuppFig4d",
+                                  "SuppFig4e",
+                                  "SuppFig4h",
+                                  "SuppFig4i"),
+                         "y"=c("RectMucosa_CD163posMacrophages__Change",
+                               "RectMucosa_DC10__Change",
+                               "RectMucosa_CD73posDC10__Change",
+                               "RectMucosa_NKG2Apos__Change",
+                               "RectMucosa_NKp44negNKG2Aneg__Change"),
+                         "trans_y"=c("identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other"))
+
+
+fill_colors_to_use <- c(ALFQA="red",Alum="blue")
+outline_colors_to_use <- c("black","black")
+
+```
+
+```{r scatterplotsVsGroupPlot___SuppFig4bdehi, ref.label=c('scatterplotsVsGroupPlot'), results='asis', fig.height=3, fig.width=4}
+```
+
+
+
+```{r scatterVsOtherSetup___SuppFig4cfklmno}
+composite_fig_name <- "SuppFig4cfklmno"
+scatter_df <- data.frame("name"=c("SuppFig4c",
+                                  "SuppFig4f",
+                                  "SuppFig4k",
+                                  "SuppFig4l",
+                                  "SuppFig4m",
+                                  "SuppFig4n",
+                                  "SuppFig4o"
+                                  ),
+                         "x"=c("RectMucosa_CD73posCD163posMacrophages__Change",
+                           "RectMucosa_CD73posCD163posMacrophages__Change",
+                           "RectMucosa_DC10__Change",
+                           "RectMucosa_CD163posMacrophages__Change",
+                           "RectMucosa_CD163posMacrophages__Change",
+                           "RectMucosa_CD73posCD163posMacrophages__WkPost",
+                           "Plasma_ADCC_Killing__WkPost"),
+                         "trans_x"=c("identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "y"=c("Vaginal_secretions_dV1gp120_antibody_titers__WkPost",
+                           "RectMucosa_CD73posDC10__Change",
+                           "RectMucosa_NKp44__WkPost",
+                           "RectMucosa_NKp44__Change",
+                           "RectMucosa_NKp44negNKG2Aneg_PMA_IFNg__Change",
+                           "RectMucosa_NKp44negNKG2Aneg_PMA_IFNg__WkPost",
+                           "RectMucosa_NKp44__Change"
+                           ),
+                         "trans_y"=c("identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other",
+                                     "other"))
+
+```
+
+```{r scatterplotsVsOtherPlot___SuppFig4cfklmno, ref.label=c('scatterplotsVsOtherPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+
+
+```{r scatterVsGroupSetup___SuppFig4j}
+composite_fig_name <- "SuppFig4j"
+scatter_df <- data.frame("name"=c("SuppFig4j"),
+                         "y"=c("Pct_IFNγ_NKG2AnegNKp44neg_ILCs_PMA_stimulated__Rectal_mucosa__week_13"),
+                         "trans_y"=c("identity"),
+                         "dataset"=c("otherStudy"))
+
+
+fill_colors_to_use <- c("white","white")
+outline_colors_to_use <- c(ALFQA="red",Alum="blue")
+
+```
+
+```{r scatterplotsVsGroupPlot___SuppFig4j, ref.label=c('scatterplotsVsGroupPlot'), results='asis', fig.height=3, fig.width=4}
+```
+
+
+
+
+## Figure 4 (Plasma cytokines) {.tabset}
+
+```{r setSamples_olink}
+### select samples from desired studies ONLY
+curr_samples <- phen_olink$animal_time_study[which(phen_olink$Study_number %in% c("VB034","VB026-B","VB042") &
+                                                          ### also add the baseline (will be duplicates)
+                                         phen_olink$Time_Point %in% c("Baseline","wk12_24h","wk13") &
+                                         phen_olink$Protective_Vaccine %in% c("YES"))]
+
+
+curr_phen_prep <- phen_olink[which(phen_olink$animal_time_study %in% curr_samples),] 
+
+####### curate olink assays 
+## remove if not in all datasets or only very low in one dataset
+### check number of NA in each olink assay
+NA_df <- data.frame("assay"=olink_assay_columns,
+                    "num_na_ALFQA"=rep(NA, length(olink_assay_columns)),
+                    "num_na_AlumVB034"=rep(NA, length(olink_assay_columns)),
+                    "num_na_AlumVB026B"=rep(NA, length(olink_assay_columns)))
+for(curr_assay in olink_assay_columns){
+  
+  NA_df$num_na_ALFQA[which(NA_df$assay == curr_assay)] <- length(which(is.na(curr_phen_prep[which(curr_phen_prep$Study_number == "VB042"),curr_assay])))
+  
+  NA_df$num_na_AlumVB034[which(NA_df$assay == curr_assay)] <- length(which(is.na(curr_phen_prep[which(curr_phen_prep$Study_number == "VB034"),curr_assay])))
+  
+    NA_df$num_na_AlumVB026B[which(NA_df$assay == curr_assay)] <- length(which(is.na(curr_phen_prep[which(curr_phen_prep$Study_number == "VB026-B"),curr_assay])))
+}
+
+### if no ALFQA cannot compare ---> need to be removed from everything
+assays_missing_ALFQA <- NA_df$assay[which(NA_df$num_na_ALFQA == 36)]
+### if no VB026-B, then could compare non-baseline only (and will be 12 ALFQA vs 17 Alum animals) ----> can include in group comparisons only for wk12_24, or ALFQA only tests for all timepoints, BUT some of the assays missing ALFQA are present in Alum and these were removed, so probably should remove these as well
+assays_missing_AlumVB026Bonly <- NA_df$assay[which(NA_df$num_na_ALFQA == 0 & 
+                                                     NA_df$num_na_AlumVB026B == 24)]
+
+
+curr_phen <- curr_phen_prep %>%
+  dplyr::select(-c(!!!rlang::syms(c(assays_missing_ALFQA,assays_missing_AlumVB026Bonly)))) %>%
+  ### make useful group
+  dplyr::mutate(group = ifelse(Study_number == "VB042",paste0("ALFQA"),paste0("ALUM")))
+
+
+olink_assay_columns_new <- intersect(olink_assay_columns, colnames(curr_phen))
+
+#### save for later 
+curr_phen_olink <- curr_phen
+
+```
+
+```{r PCAsetup___Fig4ab}
+###### set params
+group_order <- c("ALUM","ALFQA")
+group_colors <- c("blue","red")
+num_loadings_per_PC <- 5
+ellipse_prob <-  0.95
+pca_scale_to_use <- TRUE
+
+######## set timepoints & Fig names df
+fig_names_df <- data.frame("name"=c("Fig4a","Fig4b"),
+                           "tp"=c("wk12_24h","wk13"))
+
+```
+
+```{r PCA, results='asis', fig.height=4, fig.width=5}
+
+
+#### for each timepoint of interest
+for(curr_time in fig_names_df$tp){
+  curr_fig_name <- fig_names_df$name[which(fig_names_df$tp == curr_time)]
+    cat("### ",paste0(curr_fig_name," {.tabset}"),"\n")
+  cat('\n')
+ 
+  
+      cat(" ",paste0("ellipse = ",paste0(ellipse_prob*100)," % normal probability"),"\n")
+  cat('\n')
+ 
+  
+     cat(" ",paste0("top ",paste0(num_loadings_per_PC)," loadings per PC displayed"),"\n")
+  cat('\n')
+  
+  # for(pca_scale_to_use in c(TRUE,FALSE)){
+  #   
+  #       cat("#### ",paste0("scale = ", pca_scale_to_use," {.tabset}"),"\n")
+  # cat('\n')
+
+    
+    
+    ## make true long format
+    curr_phen_long1 <- curr_phen %>%
+      ### trim to timepoint
+      dplyr::filter(Time_Point == curr_time) %>%
+      tidyr::pivot_longer(all_of(olink_assay_columns_new), names_to = "Assay", values_to = "value") %>%
+      ### also add useful group
+      dplyr::mutate(log10_value = log10(value),
+                    log2_value = log2(value)) %>%
+      dplyr::arrange(group)
+    
+    
+    list_of_plotted[[paste0(curr_fig_name)]] <- curr_phen_long1[,c("animal_time_study","group","Assay","value","log10_value")]
+    
+    
+    ### generate dataframe for PCA, columns are assays, rows are samples
+    curr_cm_prep <- curr_phen_long1 %>%
+      ### trim to only the olink columns and the animal
+      dplyr::select(c(Sample_ID,group,Assay,log10_value)) %>%
+      ### combine animal and group
+      dplyr::mutate(group_animal = paste0(group,"_",Sample_ID),
+                    #group = NULL,
+                    Sample_ID = NULL) %>%
+      ### make wider
+      tidyr::pivot_wider(names_from = "Assay", values_from = "log10_value") 
+    
+    
+    curr_cm <- curr_cm_prep %>%
+      ### remove columns with all NAs for at least one group
+      dplyr::select(group, curr_cm_prep %>%
+                      group_by(group) %>%
+                      dplyr::summarise(across(everything(), ~!all(is.na(.x)))) %>%
+                      ungroup() %>%
+                      select(-group) %>%
+                      select(where(all)) %>%
+                      names()) %>%
+      ###remove group
+      dplyr::select(-group) %>%
+      ### make group_animal rownames
+      column_to_rownames("group_animal") 
+    
+    
+    
+    #### factorize curr_meta
+    curr_meta <- curr_phen_long1 %>%
+      ### select only the metadata
+      dplyr::select(c(Sample_ID,group)) %>%
+      ### make unique
+      unique() %>%
+      ### combine animal and group
+      dplyr::mutate(group_animal = paste0(group,"_",Sample_ID)) %>%
+      ### make group_animal rownames
+      column_to_rownames("group_animal") %>%
+      dplyr::mutate(group_f = factor(group, group_order))
+    
+    
+    #### print thenumber of animals
+  cat(" ",paste0(dim(curr_meta[which(curr_meta$group == "ALUM"),])[1]," ALUM + ",
+            dim(curr_meta[which(curr_meta$group == "ALFQA"),])[1]," ALFQA animals in PCA"),"\n")
+  cat('\n')
+
+    
+    
+    ### generate PCA
+    pca <- prcomp(curr_cm, scale. = pca_scale_to_use)
+    
+    ### calculate % for each PC
+    pc_pct_list <- list()
+    for(i in 1:10){
+      pc_pct_list[[paste0("PC",i)]] <- round(pca$sdev[i]^2/sum(pca$sdev^2)*100,2)
+    }
+    m.pc1 = round(pca$sdev[1]^2/sum(pca$sdev^2)*100,2)
+    m.pc2 = round(pca$sdev[2]^2/sum(pca$sdev^2)*100,2)
+    m.pc3 = round(pca$sdev[3]^2/sum(pca$sdev^2)*100,2)
+    m.pc4 = round(pca$sdev[4]^2/sum(pca$sdev^2)*100,2)
+    
+    
+    ####### only need PC1 vs PC2 as others are not useful
+    pcs_pairs <- list(c("PC1","PC2"))
+    pca_pairs_list <- list(c(1:2))
+    # pcs_pairs <- list(c("PC1","PC2"),c("PC3","PC4"),c("PC5","PC6"),c("PC7","PC8"))
+    # pca_pairs_list <- list(c(1:2),c(3:4),c(5:6),c(7:8))
+    
+    for(pca_pair in 1:length(pcs_pairs)){
+      pcs_to_plot <- pcs_pairs[[pca_pair]]
+      pca_pairs <- pca_pairs_list[[pca_pair]]
+      
+      xlab=paste0(pcs_to_plot[1]," (",pc_pct_list[[paste0(pcs_to_plot[1])]]," %)")
+      ylab=paste0(pcs_to_plot[2]," (",pc_pct_list[[paste0(pcs_to_plot[2])]]," %)")
+      
+      # cat("##### ",paste0(pcs_to_plot[1], " vs ", pcs_to_plot[2]),"\n")
+      # cat('\n')
+      # 
+      ### trim to number of loadings you want    
+      pca_trim <- pca
+      scores <- data.frame(pca_trim$x[, pca_pairs])
+      scores[] <- lapply(scores, function(x) x / sqrt(sum((x - mean(x))^2))) 
+      loadings <- as.data.frame(pca_trim$rotation)[pca_pairs]
+      
+      scale <- min(
+        max(abs(scores[,pcs_to_plot[1]]))/max(abs(loadings[,pcs_to_plot[1]])),
+        max(abs(scores[,pcs_to_plot[2]]))/max(abs(loadings[,pcs_to_plot[2]]))
+      )*0.8
+      
+      ## add labels and positions to loadings_df
+      loadings_df <- data.frame(loadings * scale) %>%
+        rownames_to_column("var") 
+      
+      ##trim    
+      top_rots <- c()
+      for(curr_pc in pcs_to_plot){
+        pca_trim_rot <- loadings_df
+        ### add sort column
+        pca_trim_rot$PC_to_sort <- abs(pca_trim_rot[,curr_pc])
+        ### collect top (pos or neg)
+        pca_trim_rot <- pca_trim_rot %>%
+          arrange(desc(PC_to_sort)) 
+        top_rots <- c(top_rots, pca_trim_rot$var[1:num_loadings_per_PC])
+      }
+      
+      ### now trim to only the top loadings
+      top_unique <- unique(top_rots)
+      loadings_df2 <- loadings_df[loadings_df$var %in% top_unique,]
+      
+      
+      
+      ######## save scores as plotted PCA
+       list_of_plotted[[paste0(curr_fig_name,"_PCA")]] <- scores %>%
+         rownames_to_column() %>%
+         ## break up group & Sample_ID
+         dplyr::mutate(group = str_before_first(rowname,"_"),
+                       Sample_ID = str_after_first(rowname,"_"),
+                       rowname = NULL) %>%
+         dplyr::relocate(group,Sample_ID)
+      
+      ### plot for all paramters:
+      
+      #### base plot
+      p <- ggplot(scores, aes(x = !!rlang::sym(pcs_to_plot[1]), y = !!rlang::sym(pcs_to_plot[2]))) + 
+        stat_ellipse(aes(fill = curr_meta$group_f), geom = "polygon", level = as.numeric(ellipse_prob), inherit.aes = TRUE, alpha = 0.4) +
+        geom_point(aes(fill=curr_meta$group_f), shape = 21, size = 3, stroke = 0.7)+
+        scale_fill_manual(name="Group",values=group_colors <- c("blue","red")) +  
+        xlab(xlab)+ylab(ylab)+
+        guides(fill=guide_legend(override.aes=list(shape=21)),color=guide_legend(override.aes=list(shape=21))) + ### change shape in legend to have fillable quality
+        
+        
+        ### add loadings on top for final plot
+        geom_segment(data = loadings_df2,
+                     aes(x = 0, y = 0, xend = !!rlang::sym(pcs_to_plot[1]), yend = !!rlang::sym(pcs_to_plot[2])), 
+                     color = "grey40", arrow = arrow(angle = 25, length = unit(4, "mm")))+
+        geom_text_repel(data = loadings_df2, aes(x = !!rlang::sym(pcs_to_plot[1]), y = !!rlang::sym(pcs_to_plot[2]), label = var), size=3.5, color="grey25",
+                        min.segment.length = 0, segment.color = 'grey60') +
+        #coord_fixed() +
+        theme_bw()+  
+        theme(panel.grid.major = element_blank() ,
+        panel.grid.minor = element_blank())
+      
+      plot(p)
+      
+      
+      cat('\n')
+      cat(' \n \n') ### this is the key! 
+      
+      ##### also print loadings dff
+      
+        to_print <- loadings_df %>% 
+          dplyr::arrange(desc(PC1)) %>%
+    DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 25,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+            
+            #) , height = "100%", width = "100%")
+    print(htmltools::tagList(to_print))
+
+      
+      
+ #   }
+    
+    cat('\n')
+    cat(' \n \n') ### this is the key! 
+    
+  }
+  
+  cat('\n')
+  cat(' \n \n') ### this is the key! 
+  
+  
+
+}
+
+cat('\n')
+cat(' \n \n') ### this is the key! 
+
+
+
+```
+
+
+```{r volcanoSetup___Fig4cd}
+fig_names_df <- data.frame("name"=c("Fig4c","Fig4d"),
+                           "tp"=c("wk12_24h","wk13"))
+
+fig_name_simp <- "Fig4cd"
+```
+
+```{r MW_2group_olink}
+#Mann-Whitney/Wilcoxon test between groups at each timepoint
+#### get data into true wide format
+## rows = animals (+ group and any metadata variables that are intrinsic (i.e. don't change with time) to the animal)
+## columns = variables + time
+group_levels <- c("ALUM","ALFQA")
+
+data_wide <- curr_phen %>%
+  ### remove unused metadata
+  dplyr::select(c(group,Time_Point,Sample_ID,c(!!!rlang::syms(c(olink_assay_columns_new))))) %>%
+  ###  make long
+  tidyr::pivot_longer(cols = all_of(olink_assay_columns_new), names_to = "variable", values_to = "value") %>%
+  ### combine variable + time 
+  dplyr::mutate(var_time = paste0(variable,"__",Time_Point),
+                ## remove variable and time
+                variable = NULL, 
+                Time_Point = NULL) %>%
+  ### make wider
+  tidyr::pivot_wider(names_from = "var_time", values_from = "value") %>%
+  ### factorize group
+  dplyr::mutate(Group_f = factor(group, group_levels),
+                ## also make rownames be animal
+                rowname = Sample_ID) %>%
+  column_to_rownames()
+
+list_of_plotted[[paste0(fig_name_simp)]] <- data_wide %>%
+  ## remove columns with all na
+  select_if(~sum(!is.na(.)) > 0) %>%
+  ### trim to only these timepoints
+  dplyr::select(group, Sample_ID, !!!rlang::syms(colnames(.)[grepl(paste(fig_names_df$tp, collapse = '|'),colnames(.))])) %>%
+  ### also remove rows if have no data
+    ### remove rows with all missing 
+  dplyr::filter_at(vars(setdiff(colnames(.),c("group","Sample_ID"))), any_vars(!is.na(.))) 
+
+
+###### trim to only variables with some variation (i.e. if all animals == 0 then removed)
+data_trim <- data_wide %>%
+  dplyr::select(where(~n_distinct(.) > 1))
+
+
+        ### trim to only the variables with data for both groups (removes if all NA in one group, even if there is data in the other group because will have nothing to compare to)
+        trim_df1 <- data_trim[which(data_trim$Group_f == group_levels[1]),] #%>% dplyr::select(-Group_f)
+        columns_with_noNAs1 <- colnames(trim_df1)[which(colSums(is.na(trim_df1)) == 0)]
+        columns_with_someNAs1 <- colnames(trim_df1)[which(colSums(is.na(trim_df1)) > 0 & colSums(is.na(trim_df1)) < dim(trim_df1)[1])]
+        columns_with_allNAs1 <- colnames(trim_df1)[which(colSums(is.na(trim_df1)) == dim(trim_df1)[1])]
+   
+        
+        trim_df2 <- data_trim[which(data_trim$Group_f == group_levels[2]),] #%>% dplyr::select(-Group_f)
+        columns_with_noNAs2 <- colnames(trim_df2)[which(colSums(is.na(trim_df2)) == 0)]
+        columns_with_someNAs2 <- colnames(trim_df2)[which(colSums(is.na(trim_df2)) > 0 & colSums(is.na(trim_df2)) < dim(trim_df2)[1])]
+        columns_with_allNAs2 <- colnames(trim_df2)[which(colSums(is.na(trim_df2)) == dim(trim_df2)[1])]
+
+
+
+        
+      new_curr_df <- data_trim[,intersect(c(columns_with_noNAs1,columns_with_someNAs1),c(columns_with_noNAs2,columns_with_someNAs2))] 
+      
+      
+        ## generate matrix with only variables that you want to test (no character variables and nothing that has zero variation across all animals)
+      Assay_mat <- data.matrix(new_curr_df %>%
+                               dplyr::select(-c(Sample_ID,group,Group_f)))
+      
+      
+          curr_p_raw <- apply(Assay_mat, 2, function(x) wilcox.test(x ~ Group_f, data = new_curr_df)$p.value)
+          curr_p_adj <- p.adjust(curr_p_raw, method = 'BH') 
+          # curr_est <- apply(new_Assay_mat, 2, function(x) wilcox.test(x[Group_f %in% c(
+          #    groups_to_compare$group1[g], groups_to_compare$group2[g])] ~ Group_f[Group_f %in% c(
+          #      groups_to_compare$group1[g], groups_to_compare$group2[g])], data = new_curr_df, conf.int = TRUE)$estimate)
+          
+          ###### first define function
+          hl <- function(x, y = NULL) {
+            if (is.null(y)) {
+              walsh <- outer(x, x, "+") / 2
+              median(walsh[lower.tri(walsh, diag = TRUE)], na.rm = TRUE)
+            } else {
+              median(outer(x, y, "-"), na.rm = TRUE)
+            }
+          }
+          
+          #### then generate the vector
+          curr_est <- c()
+          for(i in colnames(Assay_mat)){
+            ### x vs y so positive would mean up in x
+            x <- new_curr_df[which(new_curr_df$Group_f == group_levels[2]),i]
+            y <- new_curr_df[which(new_curr_df$Group_f == group_levels[1]),i]
+            ce <- hl(x, y)
+            names(ce) <- i
+            curr_est <- c(curr_est,ce)
+          }
+          
+          
+          #### combine to df
+          
+          curr_p_df <- data.frame(curr_p_raw, curr_p_adj, curr_est) %>%
+            rownames_to_column() 
+          colnames(curr_p_df) <- c("rowname",
+                                   
+                                   paste0("p_raw"),
+                                   paste0("p_adj"),
+                                   paste0("est"))
+
+        
+        
+        #### add to stats list
+        list_of_stats[[paste0(fig_name_simp,"_MW_2group")]] <- curr_p_df
+
+
+```
+
+
+```{r volcanos, results='asis', fig.height=5, fig.width=7}
+
+pointSize <- 2
+labSize <- 4.5
+
+data_for_volc_prep <- list_of_stats[[paste0(fig_name_simp,"_MW_2group")]] %>%
+  ### separate timepoint from variable
+  dplyr::mutate(variable = str_before_first(rowname,"__"),
+                Time_Point = str_after_first(rowname,"__"),
+                ###add log10(est*100) (multiply by 100 to get out of the 0-1 range)
+                log10_est100 = ifelse(est == 0, 0,
+                                      ifelse(est < 0,
+                                  -1*log10(abs(est*100)),
+                                  log10(est*100))),
+                ## add dir to color by
+                dir = ifelse(p_raw < 0.05,
+                             ifelse(est > 0, "ALFQA > ALUM", "ALFQA < ALUM"),
+                             "not_sig"))
+
+
+#### save this as plotted values
+list_of_plotted[[paste0(fig_name_simp,"_MW_2group")]] <- data_for_volc_prep 
+
+
+######## for each timepoint
+
+for(curr_time in fig_names_df$tp){
+  curr_fig_name <- fig_names_df$name[which(fig_names_df$tp == curr_time)]
+    cat("### ",paste0(curr_fig_name," {.tabset}"),"\n")
+  cat('\n')
+ 
+  
+      cat(" ",paste0("x-axis: log10(abs(MW estimate x100)) x sign of MW estimate"),"\n")
+  cat('\n')
+  
+        cat(" ",paste0("MW estimate = median of outer differences"),"\n")
+  cat('\n')
+  
+        cat(" ",paste0("outer differences = difference between all pairs of values in group1 - group2, e.g. for A = a1, a2 and B = b1, b2; then the outer differences would be: a1-b1, a2-b1, a1-b2, a2-b2. And the MW estimate is the median of these deltas. For MW estimate > 0, ALFQA > ALUM; and for MW estmate < 0, ALFQA < ALUM"),"\n")
+  cat('\n')
+  
+        cat(" ",paste0("x100 = to shift all estimates > 1 (or < -1) so that the log10 does not transform values -1 < x < 1; thus for a MW estimate of 0.01 (the smallest magnitude estimate) --> log10(0.01 x100) = 0"),"\n")
+  cat('\n')
+ 
+  data_for_volc <- data_for_volc_prep %>%
+    ### trim to timepoint
+    dplyr::filter(Time_Point == curr_time) %>%
+  ### 
+  dplyr::mutate(MW = factor(dir, c("ALFQA > ALUM","ALFQA < ALUM","not_sig")),
+                ### add label only for sig
+                label_print = ifelse(dir != "not_sig",variable,""))
+
+    color_df <- data.frame("category"=c("ALFQA > ALUM","ALFQA < ALUM","not_sig"),
+                             "colors"=c( "red","blue","grey60"))
+    
+      colors_to_use <- color_df$colors[which(color_df$category %in% unique(data_for_volc$MW))]
+      
+      p <- ggplot(data_for_volc,
+                  aes(log10_est100,-log10(p_raw),color=MW, fill=MW, label=label_print)) +
+        geom_point(size = pointSize, shape = 21, alpha = 0.65) + 
+        theme_bw()  +
+        geom_vline(xintercept = c(0),linetype="dashed",color = "grey60") +
+        geom_hline(yintercept = -log10(0.05),linetype="dashed",color = "grey60") +
+
+        geom_text_repel(max.overlaps = 20, size = labSize, 
+                        point.padding = 4,
+                        show.legend = FALSE) + #this removes the 'a' from the legend
+        scale_x_continuous(limits = c(-6,6), breaks = seq(-6,6,1))+
+        scale_color_manual(values=colors_to_use)+
+        scale_fill_manual(values=colors_to_use)+
+        theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+              axis.text = element_text(size = 13)) +
+        guides(color=guide_legend(override.aes = list(size=4), title = "MW p < 0.05"),fill=guide_legend(title = "MW p < 0.05"))+
+        scale_size(guide = 'none') ### remove the size from legend
+
+      
+plot(p)
+
+       cat("\n")
+  cat(' \n \n') ### this is the key!
+
+}
+
+     cat("\n")
+  cat(' \n \n') ### this is the key!
+
+```
+
+
+
+
+```{r alluvialSetup___Fig4e}
+fig_name_simp2 <- "Fig4e"
+```
+
+### `r paste0(fig_name_simp2)`
+
+```{r alluvial, results='asis', fig.width=6, fig.height=6}
+
+
+####### baseline same assays, without baseline
+baselineDiff_vars <- list_of_plotted[[paste0(fig_name_simp,"_MW_2group")]]$variable[which(list_of_plotted[[paste0(fig_name_simp,"_MW_2group")]]$Time_Point == "Baseline" & list_of_plotted[[paste0(fig_name_simp,"_MW_2group")]]$dir != "not_sig")]
+
+
+  cat(" ",paste0("baseline same assays, without Baseline"),"\n")
+  cat('\n')
+
+
+df_for_alluvial <- list_of_plotted[[paste0(fig_name_simp,"_MW_2group")]] %>%
+  ### remove baseline for now
+  dplyr::filter(Time_Point != "Baseline") %>%
+  dplyr::filter(!variable %in% baselineDiff_vars) %>%
+  ## only needed columns 
+  dplyr::select(variable,Time_Point,dir) %>%
+  ## remove variables not sig at both tiimepoints
+  ## first pivot wider
+  tidyr::pivot_wider(names_from = "Time_Point", values_from = "dir") %>%
+  ## add helpter column
+  dplyr::mutate(helper = paste0(wk12_24h,"_",wk13)) %>%
+  dplyr::filter(helper != "not_sig_not_sig") %>%
+  ## return to longer
+  dplyr::select(-helper) %>%
+  tidyr::pivot_longer(!variable, names_to = "Time_Point", values_to = "dir") %>%
+  ## factorize
+  dplyr::mutate(variable_f = factor(variable),
+                Time_Point_f = factor(Time_Point,c("wk12_24h","wk13")),
+                dir_f = factor(dir, c("ALFQA > ALUM","not_sig","ALFQA < ALUM"))) %>%
+  dplyr::arrange(Time_Point_f, dir_f, variable_f)
+  
+
+
+### set up colors
+color_df <- data.frame("group"=unique(levels(df_for_alluvial$dir_f)),
+                       "color"=c("red","grey","blue"))
+
+
+
+ 
+gg <- ggplot(df_for_alluvial,
+             aes(x = Time_Point_f, stratum = dir_f, alluvium = variable_f))+
+  stat_alluvium(aes(fill = dir_f), width = 1/2, alpha = 1/2,) +
+  stat_stratum(aes(stratum = dir_f, fill = dir_f), width = 1/2) +
+  scale_fill_manual(values = color_df$color)+
+  stat_alluvium(geom = "text", aes(label = variable_f), color = "white", size = 3, show.legend = FALSE) + ## to label NA category
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank())
+plot(gg)
+
+
+cat("\n")
+cat(' \n \n') ### this is the key!
+list_of_plotted[[paste0(fig_name_simp2)]] <- list_of_plotted[[paste0(fig_name_simp)]]
+list_of_plotted[[paste0(fig_name_simp2,"_MW_2group")]] <- df_for_alluvial[,c("variable","Time_Point","dir")]
+
+```
+
+
+```{r scatterVsGroupSetup___Fig4fghijk}
+composite_fig_name <- "Fig4fghijk"
+scatter_df <- data.frame("name"=c("Fig4f",
+                                  "Fig4g",
+                                  "Fig4h",
+                                  "Fig4i",
+                                  "Fig4j",
+                                  "Fig4k"),
+                         "y"=c("CCL2__wk12_24h",
+                               "IL18__wk12_24h",
+                               "IL18__wk13",
+                               "CCL2__wk13",
+                               "LTA__wk12_24h",
+                               "LTA__wk13"),
+                         "trans_y"=c("identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("olink",
+                                     "olink",
+                                     "olink",
+                                     "olink",
+                                     "olink",
+                                     "olink"))
+
+fill_colors_to_use <- c(ALFQA="red",Alum="blue")
+outline_colors_to_use <- c("black","black")
+
+```
+
+```{r scatterplotsVsGroupPlot___Fig4fghijk, ref.label=c('scatterplotsVsGroupPlot'), results='asis', fig.height=3, fig.width=4}
+```
+
+
+
+
+
+
+
+## Supp Figure 5 (Plasma cytokines) {.tabset}
+
+```{r setSamples_PCA___SuppFig5a, ref.label=c('setSamples_olink')}
+```
+
+```{r PCAsetup___SuppFig5a}
+###### set params
+group_order <- c("ALUM","ALFQA")
+group_colors <- c("blue","red")
+num_loadings_per_PC <- 5
+ellipse_prob <-  0.95
+pca_scale_to_use <- TRUE
+
+######## set timepoints & Fig names df
+fig_names_df <- data.frame("name"=c("SuppFig5a"),
+                           "tp"=c("Baseline"))
+
+```
+
+```{r PCA___SuppFig5a, ref.label=c('PCA'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+```{r volcanoSetup___SuppFig5b}
+fig_names_df <- data.frame("name"=c("SuppFig5b"),
+                           "tp"=c("Baseline"))
+
+fig_name_simp <- "SuppFig5b"
+```
+
+```{r MW_2group_olink___SuppFig5b, ref.label=c('MW_2group_olink')}
+```
+
+
+```{r volcanos___SuppFig5b, ref.label=c('volcanos'), results='asis', fig.height=5, fig.width=7}
+```
+
+
+
+```{r alluvialSetup___SuppFig5c}
+fig_name_simp2 <- "SuppFig5c"
+```
+
+### `r paste0(fig_name_simp2)`
+
+```{r alluvialShortlist, results='asis', fig.width=6, fig.height=3}
+#### finally only the baseline different vars
+
+  cat(" ",paste0("Baseline diff only"),"\n")
+  cat('\n')
+
+df_for_alluvial <- list_of_stats[[paste0(fig_name_simp,"_MW_2group")]] %>%
+  ### separate timepoint from variable
+  dplyr::mutate(variable = str_before_first(rowname,"__"),
+                Time_Point = str_after_first(rowname,"__"),
+                ###add log10(est*100) (multiply by 100 to get out of the 0-1 range)
+                log10_est100 = ifelse(est == 0, 0,
+                                      ifelse(est < 0,
+                                  -1*log10(abs(est*100)),
+                                  log10(est*100))),
+                ## add dir to color by
+                dir = ifelse(p_raw < 0.05,
+                             ifelse(est > 0, "ALFQA > ALUM", "ALFQA < ALUM"),
+                             "not_sig")) %>%
+  ## only vars different at baseline
+  dplyr::filter(variable %in% baselineDiff_vars) %>%
+  ## only needed columns 
+  dplyr::select(variable,Time_Point,dir) %>%
+  ## remove variables not sig at both tiimepoints
+  ## first pivot wider
+  tidyr::pivot_wider(names_from = "Time_Point", values_from = "dir") %>%
+  ## add helpter column
+  dplyr::mutate(helper = paste0(Baseline,"_",wk12_24h,"_",wk13)) %>%
+  dplyr::filter(helper != "not_sig_not_sig_not_sig") %>%
+  ## return to longer
+  dplyr::select(-helper) %>%
+  tidyr::pivot_longer(!variable, names_to = "Time_Point", values_to = "dir") %>%
+  ## factorize
+  dplyr::mutate(variable_f = factor(variable),
+                Time_Point_f = factor(Time_Point,c("Baseline","wk12_24h","wk13")),
+                dir_f = factor(dir, c("ALFQA > ALUM","not_sig","ALFQA < ALUM"))) %>%
+  dplyr::arrange(Time_Point_f, dir_f, variable_f)
+  
+
+
+### set up colors
+color_df <- data.frame("group"=unique(levels(df_for_alluvial$dir_f)),
+                       "color"=c("red","grey","blue"))
+
+
+
+ 
+gg <- ggplot(df_for_alluvial,
+             aes(x = Time_Point_f, stratum = dir_f, alluvium = variable_f))+
+  stat_alluvium(aes(fill = dir_f), width = 1/2, alpha = 1/2,) +
+  stat_stratum(aes(stratum = dir_f, fill = dir_f), width = 1/2) +
+  scale_fill_manual(values = color_df$color)+
+  stat_alluvium(geom = "text", aes(label = variable_f), color = "white", size = 3, show.legend = FALSE) + ## to label NA category
+  theme_bw() +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank())
+plot(gg)
+
+
+
+cat("\n")
+cat(' \n \n') ### this is the key!
+list_of_plotted[[paste0(fig_name_simp2)]] <- list_of_plotted[[paste0(fig_name_simp)]]
+list_of_plotted[[paste0(fig_name_simp2,"_MW_2group")]] <- df_for_alluvial
+
+```
+
+
+
+
+```{r setSamples_withBaseline___SuppFig5de}
+
+fig_names_df <- data.frame("name"=c("SuppFig5d","SuppFig5e"),
+                           "tp"=c("wk12_24h","wk13"))
+
+fig_name_simp <- "SuppFig5de"
+
+### select samples from desired studies & all baselines
+curr_samples <- c(phen_olink$animal_time_study[which(phen_olink$Study_number %in% c("VB034","VB026-B","VB042") &
+                                                          ### also add the baseline (will be duplicates)
+                                         phen_olink$Time_Point %in% c("Baseline","wk12_24h","wk13") &
+                                         phen_olink$Protective_Vaccine %in% c("YES"))],
+                  phen_olink$animal_time_study[which(phen_olink$Time_Point == "Baseline")]
+)
+
+
+curr_phen <- phen_olink[which(phen_olink$animal_time_study %in% curr_samples),] 
+```
+
+
+```{r vsBaselinePlots, results='asis', fig.height=9, fig.width=9}
+
+  #### for each timepoint of interest
+for(curr_time in fig_names_df$tp){
+  curr_fig_name <- fig_names_df$name[which(fig_names_df$tp == curr_time)]
+    cat("### ",paste0(curr_fig_name," {.tabset}"),"\n")
+  cat('\n')
+ 
+  ## make true long format
+  curr_phen_long1 <- curr_phen %>%
+    tidyr::pivot_longer(all_of(olink_assay_columns_new), names_to = "Assay", values_to = "value") %>%
+    ### also add useful group
+    dplyr::mutate(group = ifelse(Time_Point == "Baseline",paste0("Baseline"),
+                                 ifelse(Study_number == "VB042",paste0("ALFQA"),paste0("ALUM")))) %>%
+    ### now add in baseline for the studies of interest
+    dplyr::full_join(curr_phen[which(curr_phen$animal_time_study %in% curr_samples[duplicated(curr_samples)]),] %>%
+                       tidyr::pivot_longer(all_of(olink_assay_columns_new), names_to = "Assay", values_to = "value") %>%
+                       ### also add useful group
+                       dplyr::mutate(group = ifelse(Study_number == "VB042",
+                                                    paste0("ALFQA_baseline"),
+                                                    paste0("ALUM_baseline"))), by = c(colnames(.))) %>%
+    dplyr::mutate(group = factor(group, c("ALFQA","ALFQA_baseline","Baseline","ALUM_baseline","ALUM")),
+                  ## add log
+                  log10_value = log10(value),
+                  log2_value = log2(value)) %>%
+    ### trim to only baseline that the curr_time
+    dplyr::filter(Time_Point %in% c("Baseline",curr_time)) %>%
+    dplyr::arrange(group)
+  
+  
+  
+      
+    list_of_plotted[[paste0(curr_fig_name)]] <- curr_phen_long1[,c("animal_time_study","group","Assay","value","log10_value")]
+ #  list_of_plotted[[paste0(curr_fig_name,"_dataWithB_",curr_time)]] <- curr_phen_long1[,c("animal_time_study","group","Assay","value","log10_value")]
+
+### collect means for each Assay/group
+df_means1 <- curr_phen_long1 %>%
+  group_by(Assay, group) %>%
+  dplyr::summarise(mean = mean(log10_value, na.rm=TRUE))
+
+### remove assays that don't have both treatment groups for
+curr_phen_long <- curr_phen_long1 %>%
+  dplyr::filter(Assay %in% setdiff(unique(curr_phen_long1$Assay),unique(df_means1$Assay[which(is.nan(df_means1$mean))]))) %>%
+  dplyr::mutate(Assay = factor(Assay))
+
+df_means <- df_means1 %>%
+  dplyr::filter(Assay %in% setdiff(unique(curr_phen_long1$Assay),unique(df_means1$Assay[which(is.nan(df_means1$mean))]))) %>%
+  dplyr::mutate(Assay = factor(Assay))
+
+### get direction
+df_dir <- df_means %>%
+  tidyr::pivot_wider(names_from = "group", values_from = "mean") %>%
+  dplyr::mutate(delta = ALFQA - ALUM,
+                MW_pvalue = factor(ifelse(ALFQA > ALUM, "ALFQA > ALUM","ALFQA < ALUM"),
+                                   c("ALFQA > ALUM","ALFQA < ALUM")))
+
+
+df_dirB <- df_means %>%
+  tidyr::pivot_wider(names_from = "group", values_from = "mean") %>%
+  dplyr::mutate(delta = ALFQA_baseline - ALUM_baseline,
+                MW_pvalue = factor(ifelse(ALFQA_baseline > ALUM_baseline,
+                                          "ALFQA_baseline > ALUM_baseline",
+                                          "ALFQA_baseline < ALUM_baseline"),
+                                   c("ALFQA_baseline > ALUM_baseline","ALFQA_baseline < ALUM_baseline")))
+
+### get Assays sorted by baseline mean
+Assay_order_byBmeans <- df_dir %>%
+  dplyr::arrange(Baseline) %>%
+  dplyr::select(Assay)
+
+#### get stats
+df_stats1 <- curr_phen_long %>%
+  dplyr::mutate(Assay = factor(Assay, as.character(Assay_order_byBmeans$Assay))) %>%
+  group_by(Assay) %>%
+  wilcox_test(log10_value ~ group) %>%
+  add_significance("p") %>%
+  dplyr::filter(group1 == "ALFQA" & group2 == "ALUM") %>%
+  add_xy_position(x = "Assay", dodge = 0) %>%
+  ## add dir color
+  dplyr::left_join(df_dir[,c("Assay","MW_pvalue")], by ="Assay")
+
+df_stats <- df_stats1 %>%
+  ### modify y position
+  dplyr::mutate(y.position = -6,
+                p.signif = ifelse(p.signif == "ns","","\U2217"))
+
+
+
+#### get baseline stats
+df_statsB1 <- curr_phen_long %>%
+  dplyr::mutate(Assay = factor(Assay, as.character(Assay_order_byBmeans$Assay))) %>%
+  group_by(Assay) %>%
+  wilcox_test(log10_value ~ group) %>%
+  add_significance("p") %>%
+  dplyr::filter(group1 == "ALFQA_baseline" & group2 == "ALUM_baseline") %>%
+  add_xy_position(x = "Assay", dodge = 0) %>%
+  ## add dir color
+  dplyr::left_join(df_dirB[,c("Assay","MW_pvalue")], by ="Assay")
+
+df_statsB <- df_statsB1 %>%
+  ### modify y position
+  dplyr::mutate(y.position = -5.7,
+                p.signif = ifelse(p.signif == "ns","","b"))
+  
+
+########## collect stats to save
+list_of_stats[[paste0(curr_fig_name,"_MWwB_",curr_time)]] <- df_stats1 %>%
+  ### remove unneeded columns 
+  dplyr::select(-c(.y.,y.position,groups,x,xmin,xmax)) %>%
+  ### add column for timepoint
+  dplyr::mutate(timepoint = paste0(curr_time)) %>%
+  ### add baseline stats
+  dplyr::full_join(df_statsB1 %>%
+                     ### remove unneeded columns 
+                     dplyr::select(-c(.y.,y.position,groups,x,xmin,xmax)) %>%
+                     ### add column for timepoint
+                     dplyr::mutate(timepoint = "baseline"),
+                   by = colnames(.)) %>%
+  ### arrange by assay
+  dplyr::arrange(Assay, rev(timepoint))
+
+
+########### collect plotted means
+list_of_plotted[[paste0(curr_fig_name,"_MeanswB_",curr_time)]] <- df_means %>%
+  ### arrange by assay
+  dplyr::arrange(Assay)
+
+
+
+
+  ########### now sort by up/down, then baseline mean
+  
+  Assay_order_byUPDown <- df_dir %>%
+    ### add p vals
+    dplyr::left_join(df_stats[,c("Assay","p")], by = "Assay") %>%
+    dplyr::mutate(sig_dir = factor(ifelse(p < 0.05,as.character(MW_pvalue),"not_sig"),c("ALFQA > ALUM","not_sig","ALFQA < ALUM")),
+                  ### sort so most extreme on edges
+                  p_with_dir = ifelse(MW_pvalue == "ALFQA > ALUM",p,
+                                      ifelse(MW_pvalue == "ALFQA < ALUM",-p,p))) %>%
+  dplyr::arrange(sig_dir,desc(Baseline)) %>%
+  dplyr::select(Assay)
+  
+  #### get stats
+df_stats1 <- curr_phen_long %>%
+  dplyr::mutate(Assay = factor(Assay, rev(as.character(Assay_order_byUPDown$Assay)))) %>%
+  group_by(Assay) %>%
+  wilcox_test(log10_value ~ group) %>%
+  add_significance("p") %>%
+  dplyr::filter(group1 == "ALFQA" & group2 == "ALUM") %>%
+  add_xy_position(x = "Assay", dodge = 0) %>%
+  ## add dir color
+  dplyr::left_join(df_dir[,c("Assay","MW_pvalue")], by ="Assay")
+
+df_stats <- df_stats1 %>%
+  ### modify y position
+  dplyr::mutate(y.position = -6,
+                p.signif = ifelse(p.signif == "ns","","\U2217"))
+  
+
+  #### get baseline stats
+df_statsB1 <- curr_phen_long %>%
+  dplyr::mutate(Assay = factor(Assay, rev(as.character(Assay_order_byUPDown$Assay)))) %>%
+  group_by(Assay) %>%
+  wilcox_test(log10_value ~ group) %>%
+  add_significance("p") %>%
+  dplyr::filter(group1 == "ALFQA_baseline" & group2 == "ALUM_baseline") %>%
+  add_xy_position(x = "Assay", dodge = 0) %>%
+  ## add dir color
+  dplyr::left_join(df_dirB[,c("Assay","MW_pvalue")], by ="Assay")
+
+df_statsB <- df_statsB1 %>%
+  ### modify y position
+  dplyr::mutate(y.position = -5.7,
+                p.signif = ifelse(p.signif == "ns","","b"))
+
+  
+######### plot
+### design plot with assay on x and value on y for stats to work
+p <- ggplot(curr_phen_long[which(curr_phen_long$group == "Baseline"),] %>%
+              dplyr::mutate(Assay = factor(Assay, rev(as.character(Assay_order_byUPDown$Assay)))), aes(x = Assay, y = log10_value))+
+  geom_boxplot(color = "grey60", outlier.size = 0)+
+
+    geom_beeswarm(data = df_means %>%
+              dplyr::mutate(Assay = factor(Assay, rev(as.character(Assay_order_byUPDown$Assay)))) , aes(x=Assay, y=mean, fill = group, color = group, shape = group), dodge.width = 0.5)+
+  scale_fill_manual(values = c("#FF0000","white","grey60","white","#0244FF"))+
+  scale_color_manual(values = c('ALFQA > ALUM'="#FF0000",
+                                'ALFQA < ALUM'="#0244FF",
+                                'ALFQA_baseline > ALUM_baseline'="#FF0000",
+                                'ALFQA_baseline < ALUM_baseline'="#0244FF",
+                                "ALFQA"="#FF0000",
+                                "ALFQA_baseline"="#FF0000",
+                                "Baseline"="black",
+                                "ALUM_baseline"="#0244FF",
+                                "ALUM"="#0244FF")
+                     ,
+                     ### only have the stars in the legend
+                     breaks = c('ALFQA > ALUM', 'ALFQA < ALUM',
+                                'ALFQA_baseline > ALUM_baseline', 
+                                'ALFQA_baseline < ALUM_baseline')
+                     )+
+  scale_shape_manual(values = c(21,21,24,21,21))+
+
+  scale_y_continuous(limits = c(-6,4))+
+  stat_pvalue_manual(data=df_stats[which(df_stats$group1 == "ALFQA" & 
+                                         df_stats$group2 == "ALUM"),] ,
+                     label = "p.signif", size = 4, color = "MW_pvalue",
+                     ### remove bracket and hide non-sig
+                     remove.bracket = TRUE, #hide.ns = TRUE,
+                     family="Arial Unicode MS",
+                     vjust = 0.45, ### to get vertically aligned with Assay label
+                     coord.flip = TRUE)+
+  
+    #### baseline p-values
+    stat_pvalue_manual(data=df_statsB[which(df_statsB$group1 == "ALFQA_baseline" & 
+                                         df_statsB$group2 == "ALUM_baseline"),] ,
+                     label = "p.signif", size = 4, color = "MW_pvalue",
+                     ### remove bracket and hide non-sig
+                     remove.bracket = TRUE, #hide.ns = TRUE,
+                     family="Arial Unicode MS",
+                     vjust = 0.45, ### to get vertically aligned with Assay label
+                     coord.flip = TRUE)+
+
+   ### then flip
+coord_flip()+
+  theme_bw()+
+
+      guides(
+        ### asterisk legend
+        color=guide_legend(title = "MW p < 0.05",
+                             override.aes=list(label=c("\U2217","\U2217",
+                                                       "b","b"))),
+        ### group legend
+        fill= guide_legend(override.aes = list(color=c("#FF0000","#FF0000","black","#0244FF","#0244FF"))))+
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+
+
+
+ 
+ plot(p)
+ 
+      cat("\n")
+  cat(' \n \n') ### this is the key!
+
+
+  
+  
+  
+}
+
+
+     cat("\n")
+  cat(' \n \n') ### this is the key!
+
+
+```
+
+
+
+
+
+
+
+
+## Figure 5 (Plasma cytokines) {.tabset}
+
+
+
+```{r setup___Fig5a}
+fig_name_to_use <- "Fig5a"
+assays_to_use <- olink_assay_columns_new
+fig_name_simp <- "Fig5a"
+
+#### dummy 
+fig_names_df <- data.frame("tp"=c("Baseline","wk12_24h","wk13"))
+```
+
+### `r paste0(fig_name_to_use)` {.tabset}
+
+```{r setSamples_corrVsSelf___Fig5a, ref.label=c('setSamples_olink')}
+```
+
+```{r MW_2group_olink___5a, ref.label=c('MW_2group_olink')}
+```
+
+
+```{r AssociationWithTOA_prep___olink}
+ cor_method <- "spearman" ### "spearman", "pearson"
+  corr_vsOther_vars <- c("TOA") ### specify which non-olink variables you would like to correlate with the olink variables
+
+  corr_group_var_names <- c("ALUM","ALFQA") ### these are are as in the spreadsheet, specify which values of the grouping variable you'd like to run corrplots for
+ corr_timepoints <- c("Baseline","wk12_24h","wk13")
+  
+  ### suffix to name for output tab
+  short_name_to_use <- "vsTOA"
+  
+corr_vsOther_pval <- 0.05 ## pvalue for annotation with stars & trimming of corrplot
+
+
+```
+
+
+```{r AssociationWithTOA___Fig5a, ref.label=c('AssociationWithOther'), results='asis', fig.width=7, fig.height=6}
+```
+
+
+```{r AssociationVsSelf_prep___Fig5a}
+  corr_timepoints <- list("Baseline"=c("Baseline"),
+                          "wk12_24h"=c("wk12_24h"),
+                          "wk13"=c("wk13"))
+  corr_pval_cut <- 0.001 ## pvalue for trimming corrplot no quotes
+```
+
+```{r AssociationVsSelf___Fig5a, ref.label=c('AssociationVsSelf'), results='asis', fig.width=9, fig.height=9}
+```
+
+
+
+```{r Fig5bc_prep}
+fig_names_df <- data.frame("name"=c("Fig5b","Fig5c"),
+                          "tp"=c("wk12_24h","wk13"))
+
+```
+
+```{r IPA_inputTable, results='asis'}
+
+
+#### for each timepoint
+for(curr_time in fig_names_df$tp){
+  
+   curr_fig_name <- fig_names_df$name[which(fig_names_df$tp == curr_time)]
+
+       cat("### ",paste0(curr_fig_name," "),"\n")
+  cat('\n')
+      cat(" ",paste0("For IPA (see methods) "),"\n")
+  cat('\n')
+
+
+to_print_prep <- curr_phen_olink %>%
+  ### make longer
+  tidyr::pivot_longer(cols = !c(animal_time_study,Study_number,Sample_ID,Time_Point,TOA,Protective_Vaccine,group), names_to = "assay", values_to = "value") %>%
+  ### trim to only this time point
+  dplyr::filter(Time_Point == curr_time) %>%
+  ### add _mean to groupnames
+  dplyr::mutate(group = paste0(group,"_mean")) %>%
+  ### get ratio of means
+  group_by(group,assay) %>%
+  dplyr::summarise(mean = mean(value, na.rm = TRUE)) %>%
+  ## make wider
+  tidyr::pivot_wider(names_from = "group", values_from = "mean") %>%
+  ## add FC ratio of means
+  dplyr::mutate(FC_of_means = ALFQA_mean/ALUM_mean) %>%
+  ### add in the MW stats
+  dplyr::left_join(list_of_stats[["Fig5a_MW_2group"]] %>%
+                     ##separate timepoint & assay
+                     dplyr::mutate(assay = str_before_first(rowname,"__"),
+                                   Time_Point = str_after_first(rowname,"__")) %>%
+                     ### trim to curr_time
+                     dplyr::filter(Time_Point == curr_time) %>%
+                     ### remove unneeded columns
+                     dplyr::select(-est, -Time_Point, -rowname, -p_adj),
+                   by = "assay") %>%
+  ### add in uniprot IDs
+  dplyr::left_join(masterlist[["uniprotIDs"]], by = "assay") %>%
+  dplyr::relocate(Uniprot, .after = "assay")
+  
+
+padj_vec <- p.adjust(to_print_prep$p_raw, method = "BH")
+to_print_prep2 <- cbind(to_print_prep,data.frame("p_adj"=padj_vec))
+
+
+to_print <- to_print_prep2 %>%
+     DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 50,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+   print(htmltools::tagList(to_print))
+
+   
+   
+   #### also save to stats & plotted
+   list_of_plotted[[paste0(curr_fig_name)]] <- curr_phen_olink %>%
+     ### trim to only this time point
+     dplyr::filter(Time_Point == curr_time)
+   list_of_plotted[[paste0(curr_fig_name,"_IPAinput")]] <- to_print_prep2
+   list_of_stats[[paste0(curr_fig_name)]] <- to_print_prep2
+
+
+     cat("\n")
+  cat(' \n \n') ### this is the key!
+
+}
+     cat("\n")
+  cat(' \n \n') ### this is the key!
+
+
+```
+
+
+## Supp Figure 6 (Pathway analysis) {.tabset}
+
+```{r SuppFig6_prep}
+fig_names_df <- data.frame("name"=c("SuppFig6a","SuppFig6b"),
+                          "tp"=c("wk12_24h","wk13"))
+
+```
+
+```{r IPA_inputTable___SuppFig6, ref.label=c('IPA_inputTable'), results='asis'}
+```
+
+
+## Figure 6 (Plasma cytokines & Summary) {.tabset}
+
+### Fig 6a
+
+```{r setSamples_corrVsSelf___Fig6a, ref.label=c('setSamples_olink')}
+```
+
+
+```{r AssociationWithTOA_prep___Fig6a}
+ cor_method <- "spearman" ### "spearman", "pearson"
+  corr_vsOther_vars <- c("TOA") ### specify which non-olink variables you would like to correlate with the olink variables
+  corr_vsOther_pval <- 0.05 ## pvalue for annotation with stars & trimming of corrplot
+
+  corr_group_var_names <- c("ALUM","ALFQA") ### these are are as in the spreadsheet, specify which values of the grouping variable you'd like to run corrplots for
+  corr_timepoints <- c("Baseline","wk12_24h","wk13")
+  
+  ### suffix to name for output tab
+  short_name_to_use <- "vsTOA"
+  fig_name_to_use <- "Fig6a"
+    assays_to_use  <- olink_assay_columns_new
+    
+    #### save values used to generate figure
+    
+   list_of_plotted[[paste0(fig_name_to_use)]] <- curr_phen_olink %>%
+     ### remove basline
+     dplyr::filter(Time_Point != "Baseline")
+```
+
+
+```{r AssociationWithTOA___Fig6a, ref.label=c('AssociationWithOther'), results='asis', fig.width=7, fig.height=6}
+```
+
+
+
+```{r Fig6a_prep}
+cor_df_trim <- corVSTOA_df_prep  %>%
+  ### trim to not baseline
+  dplyr::filter(!grepl("Baseline",assay1)) %>%
+  ### also make wider by time
+  dplyr::mutate(timepoint = str_after_last(assay1,"__"),
+                assay1 = str_before_last(assay1,"__")) %>%
+  tidyr::pivot_wider(names_from = "timepoint", values_from = contains("_")) %>%
+   ### trim to p < 0.05 at least one group
+  dplyr::filter(if_any(starts_with("p_"), ~ . < corr_vsOther_pval))
+ 
+
+
+##### save to list of stats & plotted
+  list_of_plotted[[paste0(fig_name_to_use,"_sp")]] <- cor_df_trim
+  list_of_stats[[paste0(fig_name_to_use)]] <- corVSTOA_df_prep  %>%
+  ### trim to not baseline
+  dplyr::filter(!grepl("Baseline",assay1)) %>%
+  ### also make wider by time
+  dplyr::mutate(timepoint = str_after_last(assay1,"__"),
+                assay1 = str_before_last(assay1,"__")) %>%
+   ### trim to p < 0.05 at least one group
+  dplyr::filter(if_any(starts_with("p_"), ~ . < corr_vsOther_pval))
+  
+
+
+  cl_ratio <- 0.6
+    pch_cex <- 2
+    tl_cex <- 1.5
+
+```
+
+```{r vsTOAcorrplotting, results='asis', fig.width=7, fig.height=6}
+
+
+          ##### separate out the R and p
+          cor_mat <- cor_df_trim %>%
+            column_to_rownames("assay1") %>%
+            dplyr::select(contains("R_")) %>%
+            ## remove _R from colnames
+            `colnames<-`(c(str_after_last(colnames(.),"R_")))
+          
+                    ##### separate out the R and p
+          cor_test_mat <- cor_df_trim %>%
+            column_to_rownames("assay1") %>%
+            dplyr::select(contains("p_")) %>%
+            ## remove _R from colnames
+            `colnames<-`(c(str_after_last(colnames(.),"p_")))
+          
+          
+           
+#### get row order
+  vars_ann2 <- data.frame(cor_mat) %>%
+    dplyr::arrange(desc(across(everything())))
+  ordered_vars_to_use2 <- rownames(vars_ann2)
+  
+  
+  #### get column order
+  cols_ann <- data.frame("names"=colnames(cor_mat)) %>%
+    dplyr::mutate(group = str_before_first(names, "_"),
+                  tp = str_after_first(names,"_")) %>%
+    dplyr::arrange(tp, desc(group))
+  
+  ordered_cols_to_use2 <- cols_ann$names
+
+
+  ### need this in case have only since variable being compared
+  cor_mat_for_plot2 <- as.matrix(cor_mat[ordered_vars_to_use2,ordered_cols_to_use2])
+  rownames(cor_mat_for_plot2) <- ordered_vars_to_use2
+  colnames(cor_mat_for_plot2) <- ordered_cols_to_use2
+
+  cor_test_mat_for_plot2 <- as.matrix(cor_test_mat[ordered_vars_to_use2,ordered_cols_to_use2])
+  rownames(cor_test_mat_for_plot2) <- ordered_vars_to_use2
+  colnames(cor_test_mat_for_plot2) <- ordered_cols_to_use2
+
+
+  if(length(which(cor_test_mat_for_plot2 <  as.numeric(corr_vsOther_pval))) == 0){
+
+
+    corrplot::corrplot(cor_mat_for_plot2, method = 'square',
+                       is.corr = FALSE, #since not symmetric
+                       p.mat = cor_test_mat_for_plot2,
+                       sig.level = as.numeric(corr_vsOther_pval), ## doesn't work if none are sig
+                       #sig.level = 0.1,#set p < 0.05 to blank
+                       insig='pch',
+                       pch.cex = pch_cex, pch.col = 'black',tl.col = 'black',tl.cex=tl_cex,
+                       ##legend
+                       cl.ratio = cl_ratio, #cl.cex = 2,
+
+                       #addCoef.col ='grey80',
+                       #number.cex = 0.5, #add corr coeff to sig circles
+                       #order = order, ## CANNOT ORDER ASSYMMETRIC
+                       col = (COL2('PuOr',1000)), ##make orange NEGATIVE
+                       col.lim = c(-1,1) ##set limits to be the same across plots
+                       # title = vaccine_groups[i], mar=c(0,0,1,0) # http://stackoverflow.com/a/14754408/54964
+    )
+
+
+  }else{
+    #### otherwise can use the stars
+    corrplot::corrplot(cor_mat_for_plot2, method = 'square',
+                       is.corr = FALSE, #since not symmetric
+                       p.mat = cor_test_mat_for_plot2,
+                       sig.level = as.numeric(corr_vsOther_pval),
+                       insig='label_sig',  #set p < 0.05 to blank
+                       pch.cex = pch_cex, pch.col = 'white',tl.col = 'black',tl.cex=tl_cex,
+                       ##legend
+                       cl.ratio = cl_ratio,#cl.cex = 2,
+                       #addCoef.col ='grey80',
+                       #number.cex = 0.5, #add corr coeff to sig circles
+                       #order = order, ## CANNOT ORDER ASSYMMETRIC
+                       col = (COL2('PuOr',1000)), ##make orange NEGATIVE
+                       col.lim = c(-1,1) ##set limits to be the same across plots
+                       # title = vaccine_groups[i], mar=c(0,0,1,0) # http://stackoverflow.com/a/14754408/54964
+    )
+
+  }
+
+  cat("\n")
+  cat(' \n \n') ### this is the key!
+  
+   
+      
+```
+
+
+
+```{r scatterVsTOASetup___Fig6bd}
+composite_fig_name <- "Fig6bd"
+scatter_df <- data.frame("name"=c("Fig6b",
+                                  "Fig6d"),
+                         "y"=c("LTA__wk13",
+                               "CCL8__wk12_24h"),
+                         "trans_y"=c("identity",
+                                     "identity"),
+                         "dataset"=c("olink",
+                                     "olink"))
+
+```
+
+```{r scatterplotsVsTOAPlot___Fig6bd, ref.label=c('scatterplotsVsTOAPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+```{r scatterVsOtherSetup___Fig6c}
+composite_fig_name <- ""
+scatter_df <- data.frame("name"=c("Fig6c"),
+                         "x"=c("RectMucosa_DC10__Change"),
+                         "trans_x"=c("identity"),
+                         "y"=c("LTA__wk13"),
+                         "trans_y"=c("identity"),
+                         "dataset"=c("both"))
+
+```
+
+```{r scatterplotsVsOtherPlot___Fig6c, ref.label=c('scatterplotsVsOtherPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+
+### Fig 6e
+
+Summary of variables different ALFQA vs Alum, associations with TOA
+
+
+
+
+
+## Supp Figure 7 (Plasma cytokines & summary) {.tabset}
+
+### Supp Fig7a
+
+```{r SuppFig7a_prep}
+fig_name_to_use <- "SuppFig7a"
+cor_df_trim <- corVSTOA_df_prep  %>%
+  ### also make wider by time
+  dplyr::mutate(timepoint = str_after_last(assay1,"__"),
+                assay1 = str_before_last(assay1,"__")) %>%
+  tidyr::pivot_wider(names_from = "timepoint", values_from = contains("_")) 
+### no further trimming
+ 
+
+
+##### save to list of stats & plotted
+list_of_plotted[[paste0(fig_name_to_use)]] <- curr_phen_olink
+  list_of_plotted[[paste0(fig_name_to_use,"_sp")]] <- cor_df_trim
+  list_of_stats[[paste0(fig_name_to_use)]] <- corVSTOA_df_prep  %>%
+  ### also make wider by time
+  dplyr::mutate(timepoint = str_after_last(assay1,"__"),
+                assay1 = str_before_last(assay1,"__")) 
+  
+
+
+  cl_ratio <- 2
+    pch_cex <- 1.2
+    tl_cex <- 0.8
+
+```
+
+```{r vsTOAcorrplotting___SuppFig7a, ref.label=c('vsTOAcorrplotting'), results='asis', fig.width=7, fig.height=6}
+```
+
+
+### Supp Fig7b
+
+```{r SuppFig7b_prep}
+fig_name_to_use <- "SuppFig7b"
+```
+
+```{r setSamples_corrOlinkVsOther}
+### generate curr_phen with BOTH olink and other assays
+## first find animals that are in both datasets
+overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sample_ID)) ### 41 animals
+
+
+
+### curr_phen has rows = animals/time, columns = assays
+curr_phen <- data_long %>%
+  ## make simpler timepoint
+  dplyr::mutate(Time_simp = ifelse(grepl("Wk",Time_Point),"WkPost",Time_Point),
+                Time_Point = Time_simp,
+                Time_simp = NULL,
+                ### also make group with all caps
+                group = toupper(Group)) %>%
+  ## make wider
+  unique() %>%
+  ## remove duplicate rows with NA + number
+  group_by(Sample_ID,Group, group,TOA,Time_Point,variable) %>%
+  dplyr::reframe(across(everything(), ~ first(na.omit(.)))) %>%
+  tidyr::pivot_wider(names_from = "variable",values_from = "value") %>%
+  ### trim to overlapping animals
+  dplyr::filter(Sample_ID %in% overlap_animals) %>%
+  ####### add in olink
+  dplyr::full_join(phen_olink %>%
+                     ### trim to overlapping animals
+                     dplyr::filter(Sample_ID %in% overlap_animals) %>%
+                     ### combine variable & timepoint for olink assays
+                     ## first need to make longer
+                     tidyr::pivot_longer(cols = c(!!!rlang::syms(olink_assay_columns_new)),
+                                         names_to = "variable",
+                                         values_to = "value") %>%
+                     dplyr::mutate(var_time = paste0(variable,"__",Time_Point)) %>%
+                     ### remove anything with timepoint
+                     dplyr::select(Sample_ID,var_time,value) %>%
+                     tidyr::pivot_wider(names_from = "var_time",values_from = "value")
+                   ,
+                   by = c("Sample_ID"))
+
+### save for later
+curr_phen_both <- curr_phen
+```
+
+
+
+```{r AssociationOlinkVsOtherAssays_prep}
+cor_method <- "spearman" ### "spearman", "pearson"
+#### other vars will be the olink in this case
+corr_vsOther_vars <- c(paste0(olink_assay_columns_new,"__Baseline"),
+                       paste0(olink_assay_columns_new,"__wk12_24h"),
+                       paste0(olink_assay_columns_new,"__wk13"))
+corr_vsOther_pval_ann <- 0.05 ## pvalue for annotation with stars of corrplot
+corr_vsOther_pval_cut <- 0.05 ## pvalue for trimming corrplot no quotes
+
+corr_group_var_names <- c("ALUM","ALFQA") ### these are are as in the spreadsheet, specify which values of the grouping variable you'd like to run corrplots for
+corr_timepoints <- c("Baseline","WkPost","Change")
+
+### suffix to name for output tab
+short_name_to_use <- "OtherVsOlink"
+#### these are the NON-olink assays
+assays_to_use_prep  <- colnames(curr_phen)[!grepl(paste(c("Sample_ID","Group","group","TOA","Time_Point"), collapse = '|'),colnames(curr_phen))]
+assays_to_use  <- assays_to_use_prep[!grepl("__",assays_to_use_prep)]
+```
+
+
+```{r AssociationOlinkVsOther___SuppFig7b, ref.label=c('AssociationWithOther'), results='asis', fig.width=12, fig.height=6}
+```
+
+```{r SuppFig7b_printTables, results='asis'}
+
+######### trim to only RM DC10
+
+to_print_prep7b <- list_of_stats[[paste0(fig_name_to_use,"_",short_name_to_use)]] %>%
+  dplyr::filter(assay1 %in% c("RectMucosa_DC10__WkPost","RectMucosa_DC10__Change")) %>%
+  ### trim to only wk12_24h in olink
+  dplyr::filter(grepl("wk12_24h",assay2)) %>%
+  ### trim to only sig interactions
+  dplyr::filter(p_ALFQA < 0.05) %>%
+  
+#### add MW dir for each assay
+  ### first for RM
+   dplyr::left_join(list_of_stats[[paste0("Fig3j_MW_2group")]] %>%
+                      ## remove __ and make Wk generic
+                      dplyr::mutate(rowname = ifelse(grepl("Wk",rowname),
+                                                     paste0(str_before_last(rowname,"Wk"),"WkPost"),
+                                                     rowname),
+                                  #  rowname = str_replace_all(rowname,"__","_"),
+                                    assay1_MW_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(rowname,assay1_MW_dir) %>%
+                      ### rename rowname to assay1
+                      dplyr::rename(assay1=rowname),
+                    by = "assay1") %>%
+  ### then for Olink
+      dplyr::left_join(list_of_stats[[paste0("Fig5a_MW_2group")]] %>%
+                      ## remove __ and make Wk generic
+                      dplyr::mutate(#rowname = str_replace_all(rowname,"__","_"),
+                                    assay2_MW_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(rowname,assay2_MW_dir) %>%
+                      ### rename rowname to assay1
+                      dplyr::rename(assay2=rowname),
+                    by = "assay2") %>%
+  
+  
+  #### add vsTOA for each assay
+  
+  ### first RM
+      dplyr::left_join(list_of_stats[[paste0("Fig3j_vsTOA")]] %>%
+                         ### trim to only this group
+                         dplyr::select(assay1,!!!rlang::syms(colnames(.)[grepl(curr_group,colnames(.))])) %>%
+                         ### make colnames generic
+                         `colnames<-`(c(str_remove_all(colnames(.),curr_group))) %>%
+                      ## remove __ 
+                      dplyr::mutate(#assay1 = str_replace_all(assay1,"__","_"),
+                                    assay1_vsTOA_dir = ifelse(p_ < 0.05,
+                                                    ifelse(R_ > 0,
+                                                           "pos",
+                                                           "neg"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay1,assay1_vsTOA_dir),
+                    by = "assay1") %>%
+  
+  ### then olink
+      dplyr::left_join(list_of_stats[[paste0("Fig5a_vsTOA")]] %>%
+                         ### trim to only this group
+                         dplyr::select(assay1,!!!rlang::syms(colnames(.)[grepl(curr_group,colnames(.))])) %>%
+                         ### make colnames generic
+                         `colnames<-`(c(str_remove_all(colnames(.),curr_group))) %>%
+                      ## remove __ 
+                      dplyr::mutate(assay2 = assay1,
+                                    assay2_vsTOA_dir = ifelse(p_ < 0.05,
+                                                    ifelse(R_ > 0,
+                                                           "pos",
+                                                           "neg"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay2,assay2_vsTOA_dir),
+                    by = "assay2") 
+
+to_print <- to_print_prep7b %>%
+ 
+
+     DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 50,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+   print(htmltools::tagList(to_print))
+
+        cat("\n")
+      cat(' \n \n') ### this is the key!
+      
+      
+      #### also add to plotted
+      list_of_plotted[[paste0(fig_name_to_use)]] <- curr_phen_both ## full data used
+      list_of_plotted[[paste0(fig_name_to_use,"_trimStats")]] <- to_print_prep7b
+      list_of_stats[[paste0(fig_name_to_use)]] <- to_print_prep7b      
+```
+
+
+```{r scatterVsOtherSetup___SuppFig7cde}
+
+composite_fig_name <- "SuppFig7cde"
+
+scatter_df <- data.frame("name"=c("SuppFig7c",
+                                  "SuppFig7d",
+                                  "SuppFig7e"),
+                         "x"=c("RectMucosa_DC10__Change",
+                               "RectMucosa_DC10__Change",
+                               "RectMucosa_DC10__Change"),
+                         "trans_x"=c("identity",
+                                     "identity",
+                                     "identity"),
+                         "y"=c("MMP12__wk12_24h",
+                               "CCL13__wk12_24h",
+                               "VEGFA__wk12_24h"),
+                         "trans_y"=c("identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("both",
+                                     "both",
+                                     "both"))
+
+```
+
+```{r scatterplotsVsOtherPlot___SuppFig7cde, ref.label=c('scatterplotsVsOtherPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+### Supp Fig7f {.tabset}
+
+```{r SuppFig7f_printTables_prep}
+assays_to_keep <- "CCL8"
+tp_to_keep <- "wk12_24h"
+fig_name_to_use <- "SuppFig7f"
+```
+
+```{r olinkVsSelf_printTables, results='asis'}
+to_print_prep_combo <- data.frame()
+#### for each group
+for(curr_group in c("ALUM","ALFQA")){
+     cat("#### ",paste0(curr_group," "),"\n")
+  cat('\n')
+ 
+
+######### trim to only assays_to_keep vs other olink
+#### start with olink vs self (includes inverted duplicates so only only have to trim on one assay)
+to_print_prep7f <- list_of_stats[["Fig5a_vsSelf"]] %>%
+  dplyr::filter(assay1 %in% assays_to_keep & tp == tp_to_keep) %>%
+  ### remove self association
+  dplyr::filter(assay1 != assay2) %>%
+  ### trim to only sig interactions for at least one group
+  dplyr::filter(!!rlang::sym(paste0(curr_group,"_p")) < 0.05) %>%
+  
+#### add MW dir for each assay
+  ### first for assay1
+   dplyr::left_join(list_of_stats[[paste0("Fig5a_MW_2group")]] %>%
+                      ### trim to wk12_24h
+                      dplyr::filter(grepl(tp_to_keep,rowname)) %>%
+                      ### add dir
+                      dplyr::mutate(assay1 = str_before_first(rowname,"__"),
+                                    assay1_MWpost_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay1,assay1_MWpost_dir),
+                    by = "assay1") %>%
+    dplyr::left_join(list_of_stats[[paste0("Fig5a_MW_2group")]] %>%
+                      ### trim to Baseline
+                      dplyr::filter(grepl("Baseline",rowname)) %>%
+                      ### add dir
+                      dplyr::mutate(assay1 = str_before_first(rowname,"__"),
+                                    assay1_MWBaseline_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay1,assay1_MWBaseline_dir),
+                    by = "assay1") %>%
+  ### then for assay2
+      dplyr::left_join(list_of_stats[[paste0("Fig5a_MW_2group")]] %>%
+                      ### trim to wk12_24h
+                      dplyr::filter(grepl(tp_to_keep,rowname)) %>%
+                      ### add dir
+                      dplyr::mutate(assay2 = str_before_first(rowname,"__"),
+                                    assay2_MWpost_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay2,assay2_MWpost_dir),
+                    by = "assay2") %>%
+      dplyr::left_join(list_of_stats[[paste0("Fig5a_MW_2group")]] %>%
+                      ### trim to Baseline
+                      dplyr::filter(grepl("Baseline",rowname)) %>%
+                      ### add dir
+                      dplyr::mutate(assay2 = str_before_first(rowname,"__"),
+                                    assay2_MWBaseline_dir = ifelse(p_raw < 0.05,
+                                                    ifelse(est > 0,
+                                                           "up",
+                                                           "down"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay2,assay2_MWBaseline_dir),
+                    by = "assay2") %>%
+  
+  
+  #### add vsTOA in this group
+  
+  ### first assay1 (assays_to_keep)
+      dplyr::left_join(list_of_stats[[paste0("Fig5a_vsTOA")]] %>%
+                         ### trim to only this group
+                         dplyr::select(assay1,!!!rlang::syms(colnames(.)[grepl(curr_group,colnames(.))])) %>%
+                         ### make colnames generic
+                         `colnames<-`(c(str_remove_all(colnames(.),curr_group))) %>%
+                         ### trim to only wk12_24h
+                         dplyr::filter(grepl(tp_to_keep, assay1)) %>%
+                      ## remove __ 
+                      dplyr::mutate(assay1 = str_before_first(assay1,"__"),
+                                    assay1_vsTOA_dir = ifelse(p_ < 0.05,
+                                                    ifelse(R_ > 0,
+                                                           "pos",
+                                                           "neg"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay1,assay1_vsTOA_dir),
+                    by = "assay1") %>%
+  
+  ### then olink
+      dplyr::left_join(list_of_stats[[paste0("Fig5a_vsTOA")]] %>%
+                         ### trim to only this group
+                         dplyr::select(assay1,!!!rlang::syms(colnames(.)[grepl(curr_group,colnames(.))])) %>%
+                         ### make colnames generic
+                         `colnames<-`(c(str_remove_all(colnames(.),curr_group))) %>%
+                          ### trim to only wk12_24h
+                         dplyr::filter(grepl(tp_to_keep, assay1)) %>%
+                      ## remove __ 
+                      dplyr::mutate(assay2 = str_before_first(assay1,"__"),
+                                    assay2_vsTOA_dir = ifelse(p_ < 0.05,
+                                                    ifelse(R_ > 0,
+                                                           "pos",
+                                                           "neg"),
+                                                    "not_sig")) %>%
+                      ### trim to only dir & rowname
+                      dplyr::select(assay2,assay2_vsTOA_dir),
+                    by = "assay2") 
+
+to_print <- to_print_prep7f %>%
+ 
+
+     DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 50,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+   print(htmltools::tagList(to_print))
+
+        cat("\n")
+      cat(' \n \n') ### this is the key!
+      
+      
+      ### add to combo
+      to_print_prep_combo <- rbind(to_print_prep_combo, to_print_prep7f %>%
+                                     dplyr::mutate(Group = paste0(curr_group)) %>%
+                                     dplyr::relocate(Group))
+      
+}
+    cat("\n")
+      cat(' \n \n') ### this is the key!
+  
+      
+      
+      
+        #### also add to plotted & stats
+      list_of_plotted[[paste0(fig_name_to_use)]] <-  list_of_plotted[[paste0("Fig5a")]] %>%
+        ### trim to only this tp_to_use
+        dplyr::select(group,Sample_ID,!!!rlang::syms(colnames(.)[grepl(tp_to_keep,colnames(.))]))
+      list_of_plotted[[paste0(fig_name_to_use,"_trimStats")]] <- to_print_prep_combo
+      list_of_stats[[paste0(fig_name_to_use)]] <- to_print_prep_combo      
+
+      
+```
+
+
+
+
+
+
+## Supp Figure 8 (Plasma cytokines & summary) {.tabset}
+
+
+```{r scatterVsTOASetup___SuppFig8abc}
+composite_fig_name <- "SuppFig8abc"
+scatter_df <- data.frame("name"=c("SuppFig8a",
+                                  "SuppFig8b",
+                                  "SuppFig8c"),
+                         "y"=c("IL17F__wk13",
+                               "CXCL8__wk13",
+                               "EGF__wk13"),
+                         "trans_y"=c("identity",
+                                     "identity",
+                                     "identity"),
+                         "dataset"=c("olink",
+                                     "olink",
+                                     "olink"))
+
+```
+
+```{r scatterplotsVsTOAPlot___SuppFig8abc, ref.label=c('scatterplotsVsTOAPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+
+
+```{r scatterVsOtherSetup___SuppFig8d}
+composite_fig_name <- ""
+scatter_df <- data.frame("name"=c("SuppFig8d"),
+                         "x"=c("CXCL8__wk13"),
+                         "trans_x"=c("identity"),
+                         "y"=c("EGF__wk13"),
+                         "trans_y"=c("identity"),
+                         "dataset"=c("olink"))
+
+```
+
+```{r scatterplotsVsOtherPlot___SuppFig8d, ref.label=c('scatterplotsVsOtherPlot'), results='asis', fig.height=4, fig.width=5}
+```
+
+
+
+### Supp Fig8e  {.tabset}
+
+```{r SuppFig8e_printTables_prep}
+assays_to_keep <- c("LTA","EGF","CXCL8","IL17F")
+tp_to_keep <- "wk13"
+fig_name_to_use <- "SuppFig8e"
+```
+
+```{r olinkVsSelf_printTables___SuppFig8e, ref.label=c('olinkVsSelf_printTables'), results='asis'}
+```
+
+
+
+
+
+
+
+## Data tables {.tabset}
+
+### Raw Values 
+
+```{r rawVals_print}
+#### add with button
+xfun::embed_file(file.path(input_dir,paste0("list_of_RAWdatasets.xlsx")), text = "Excel spreadsheet of RAW datasets")
+
+```
+
+### Plotted Values 
+
+```{r plottedVals_print}
+
+### sort tabs
+list_of_plottedS <- list_of_plotted[order(names(list_of_plotted))]
+##save
+openxlsx::write.xlsx(list_of_plottedS,file.path(outputTABLES_dir,paste0("SourceDataFile.xlsx")))
+
+#### add with button
+xfun::embed_file(file.path(outputTABLES_dir,paste0("SourceDataFile.xlsx")), text = "Excel spreadsheet of plotted values")
+
+```
+
+### Stats {.tabset}
+
+Mann-Whitney/Wilcoxon test between groups at each timepoint
+
+Spearman correlation between TOA and assays, or among assays
+
+```{r stats_print}
+##save
+openxlsx::write.xlsx(list_of_stats,file.path(outputTABLES_dir,paste0("list_of_stats.xlsx")))
+
+#### add with button
+xfun::embed_file(file.path(outputTABLES_dir,paste0("list_of_stats.xlsx")), text = "Excel spreadsheet of stats")
+
+```
+
+
+
+## Session info
+
+```{r sessioninfo}
+sessionInfo()
+```
