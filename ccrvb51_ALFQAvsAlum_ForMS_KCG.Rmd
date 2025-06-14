@@ -377,6 +377,7 @@ Scatterplots vs 3 groups
 
 ```{r SuppFig1_scatterplots, results='asis', fig.height=4, fig.width=4}
 
+
 fig_name_to_use <- "SuppFig1"
 #### plot VL vs time by group, with ave, stdev & stats between groups for each timepoint
 dodge_to_use <- 0.8
@@ -423,15 +424,21 @@ stat_test <- df_to_plot_prep %>%
 ### set up df to collect stats
 stat_test <- data.frame()
 
+fig_names_df1 <- data.frame("name"=c("a","b","c","d","e","f","g"),
+                            "week"=unique(df_to_plot_prep$weeks_post_infection))
+
+
 #### list of plots with each variable separately
 list_of_plots <- list()
-for (i in unique(df_to_plot_prep$weeks_post_infection)){
+for (i in fig_names_df1$week){
  
   #### get stats formatting
 #  https://www.datanovia.com/en/blog/how-to-add-p-values-onto-a-grouped-ggplot-using-the-ggpubr-r-package/
  
-  
-        cat("### ",paste0("week ",i, " post infection "),"\n")
+  curr_fig_name <- fig_names_df1$name[which(fig_names_df1$week == i)]
+        cat("### ",paste0(fig_name_to_use,curr_fig_name),"\n")
+      cat('\n')
+      cat(" ",paste0("week ",i, " post infection "),"\n")
       cat('\n')
  
   ###### p values for this week
@@ -462,7 +469,7 @@ for (i in unique(df_to_plot_prep$weeks_post_infection)){
   scale_fill_manual(values = c(Control = "black",
                                 Alum = "blue",
                                 ALFQA = "red"))+
-    geom_beeswarm(aes(x = Group, y = !!rlang::sym(paste0("VL_week",i)), group = Group, fill = Group), dodge.width = dodge_to_use, cex = 3, size = 12, shape = 21, color = "black") + 
+    geom_beeswarm(aes(x = Group, y = !!rlang::sym(paste0("VL_week",i)), group = Group, fill = Group), dodge.width = dodge_to_use, cex = 3, size = 3, shape = 21, color = "black") + 
     
     # geom_bar(aes(color = Group_f),stat = "summary", fun = "mean", na.rm = TRUE,alpha = 0.3,
     #    position = position_dodge(width = dodge_to_use), width = 0.7) +
@@ -476,10 +483,10 @@ for (i in unique(df_to_plot_prep$weeks_post_infection)){
   curr_stat_test,  label = "p", tip.length = 0
   )+
     stat_summary(
-    fun = "mean",        #argument updated in new version.
+    fun = "median",        #argument updated in new version.
     geom = "point",
     col = "grey30",
-    size = 3,
+    size = 12,
     shape = 95,
     fill = "grey"
   )+
@@ -718,7 +725,7 @@ overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sampl
           stat_compare_means(method = "wilcox.test", label.x = 1.25, label="p.format")+
           ### add mean
           stat_summary(color = "black", geom = "point", shape = 95, size = 12, show.legend = F,
-                     fun = mean)+
+                     fun = median)+
           ### add horizontal dotted line at zero
           geom_hline(yintercept = 0, linetype = "dashed", color = "grey")+
           
@@ -916,6 +923,8 @@ overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sampl
           ### add reg line
           geom_smooth(aes(x = as.numeric(!!rlang::sym(scatter_df$x[curr_pair])), color = Group), method = lm, se = FALSE, linewidth = 0.5, formula = 'y ~ x ') +
          scale_x_continuous(transform = scatter_df$trans_x[curr_pair])+  
+                    ### add horizontal dotted line at zero
+          geom_hline(yintercept = 0, linetype = "dashed", color = "grey")+
           xlab(xlab_to_use)+
           ylab(ylab_to_use)+
           scale_y_continuous(transform = scatter_df$trans_y[curr_pair])+  
@@ -956,7 +965,7 @@ overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sampl
 composite_fig_name <- "Fig2di"
 scatter_df <- data.frame("name"=c("Fig2d",
                                   "Fig2i"),
-                         "y"=c("Plasma_ADCC_Killing__WkPost",
+                         "y"=c("Plasma_V2specific_ADCC_Killing__WkPost",
                                "Plasma_ADNP_SIVgp120dV1__Change"),
                          "trans_y"=c("identity",
                                      "identity"),
@@ -1096,6 +1105,8 @@ overlap_animals <- intersect(unique(data_long$Sample_ID),unique(phen_olink$Sampl
           ### add reg line
           geom_smooth(aes(x = as.numeric(TOA), color = Group), method = lm, se = FALSE, linewidth = 0.5, formula = 'y ~ x ') +
          scale_x_continuous(breaks = seq(0,12,1), limits = c(0,12))+  
+                          ### add horizontal dotted line at zero
+          geom_hline(yintercept = 0, linetype = "dashed", color = "grey")+
           xlab("N. vaginal challenges")+
           ylab(ylab_to_use)+
           scale_y_continuous(transform = scatter_df$trans_y[curr_pair])+  
@@ -1179,6 +1190,8 @@ list_of_plotted[[paste0(fig_name_to_use)]] <- curr_phen %>%
 group_levels <- c("Alum","ALFQA")
 
 data_wide <- data_long %>%
+    ## TRIM TO ONLY vars of interest
+  dplyr::filter(variable %in% assays_to_use) %>%
   ### combine variable + time 
   dplyr::mutate(var_time = paste0(variable,"__",Time_Point),
                 ## remove variable and time
@@ -1273,7 +1286,7 @@ data_trim <- data_wide %>%
   corr_vsOther_vars <- c("TOA") ### specify which non-olink variables you would like to correlate with the olink variables
 
   corr_group_var_names <- c("ALUM","ALFQA") ### these are are as in the spreadsheet, specify which values of the grouping variable you'd like to run corrplots for
- corr_timepoints <- c("WkPost","Change")
+ corr_timepoints <- c("WkPost","Change") ### not looking at baseline associations
   
   ### suffix to name for output tab
   short_name_to_use <- "vsTOA"
@@ -1654,7 +1667,7 @@ for(curr_time in names(corr_timepoints)){
                                  assay1,
                                  paste0(assay1,"_",curr_time)),
                  assay2 = ifelse(grepl("_",assay2),
-                                 assay1,
+                                 assay2,
                                  paste0(assay2,"_",curr_time))) %>%
    #### add MW dir for each assay
    dplyr::left_join(list_of_stats[[paste0(fig_name_to_use,"_MW_2group")]] %>%
@@ -2057,7 +2070,7 @@ scatter_df <- data.frame("name"=c("Fig3c",
                                   "Fig3g"),
                          "y"=c("RectMucosa_DC10__Change",
                                "RectMucosa_NKp44__Change",
-                               "RectMucosa_NKp44_IL17_gp120_stimulated__Change"),
+                               "RectMucosa_NKp44_gp120_IL17__Change"),
                          "trans_y"=c("identity",
                                      "identity",
                                      "identity"),
@@ -2183,12 +2196,12 @@ scatter_df <- data.frame("name"=c("SuppFig4c",
                                   ),
                          "x"=c("RectMucosa_CD73posCD163posMacrophages__Change",
                            "RectMucosa_CD73posCD163posMacrophages__Change",
-                           "RectMucosa_DC10__Change",
+                           "RectMucosa_DC10__WkPost",
                            "RectMucosa_CD163posMacrophages__Change",
                            "RectMucosa_CD163posMacrophages__Change",
                            "RectMucosa_CD73posCD163posMacrophages__WkPost",
-                           "Plasma_ADCC_Killing__WkPost"),
-                         "trans_x"=c("identity",
+                           "Plasma_V2specific_ADCC_Killing__WkPost"),
+                         "trans_x"=c("log10",
                                      "identity",
                                      "identity",
                                      "identity",
@@ -3589,6 +3602,82 @@ scatter_df <- data.frame("name"=c("Fig6c"),
 ### Fig 6e
 
 Summary of variables different ALFQA vs Alum, associations with TOA
+
+
+```{r Fig6e_summary, results='asis'}
+fig_name_to_use <- "Fig6e"
+
+
+#### collect all MW
+combo_stats <- list_of_stats[["Fig2l_MW_2group"]] %>% ## first from plasma
+  ## then from RM
+  dplyr::full_join(list_of_stats[["Fig3j_MW_2group"]],
+                   by = colnames(.)) %>%
+
+  ## then for olink, keeps the real wk
+  dplyr::full_join(list_of_stats[["Fig5a_MW_2group"]],
+                   by = colnames(.)) %>%
+
+      ### should have all the var names, but need to make generic wk
+  dplyr::mutate(rowname = ifelse(grepl("Wk",rowname),
+                                 paste0(str_before_last(rowname,"__Wk"),"__WkPost"),
+                                 rowname)) %>%
+
+
+#combo_stats2 <- 
+dplyr::left_join(
+    list_of_stats[["Fig2l_vsTOA"]] %>%
+                     full_join(list_of_stats[["Fig3j_vsTOA"]], by = c("assay1","assay2","R_ALFQA","p_ALFQA")) %>%
+                     full_join(list_of_stats[["Fig5a_vsTOA"]], by = c("assay1","assay2","R_ALFQA","p_ALFQA","R_ALUM","p_ALUM")) %>%
+    dplyr::rename(rowname = assay1) %>%
+    dplyr::select(-assay2),
+  by = "rowname") %>%
+
+  ### now trim to p < 0.05 for MW OR TOA p< 0.05 for at least one
+  dplyr::filter(p_raw < 0.05 | p_ALFQA < 0.05 | p_ALUM < 0.05) %>%
+  ## add helpful columns
+  dplyr::mutate(MW_dir = ifelse(p_raw < 0.05,
+                                ifelse(est > 0, "up","down"),
+                                "not_sig"),
+                vsTOA_ALFQA_dir = ifelse(p_ALFQA < 0.05,
+                                         ifelse(R_ALFQA > 0,"pos","neg"),
+                                         "not_sig"),
+                vsTOA_ALUM_dir = ifelse(p_ALUM < 0.05,
+                                         ifelse(R_ALUM > 0,"pos","neg"),
+                                         "not_sig")) %>%
+  dplyr::rename(MW_p_raw = p_raw, MW_p_adj=p_adj, MW_est = est) %>%
+  dplyr::relocate(rowname,MW_dir,vsTOA_ALFQA_dir,vsTOA_ALUM_dir)
+
+
+
+ to_print <- combo_stats %>%
+   
+     DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           iDisplayLength = 50,
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+   print(htmltools::tagList(to_print))
+
+ #   
+ # to_print <- combo_stats2 %>%
+ #   
+ #     DT::datatable(extensions = 'Buttons',
+ #            options = list(dom = 'Blfrtip',
+ #                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+ #                           iDisplayLength = 50,
+ #                           lengthMenu = list(c(10,25,50,-1),
+ #                                             c(10,25,50,"All"))))
+ #   print(htmltools::tagList(to_print))
+ # 
+
+       cat("\n")
+      cat(' \n \n') ### this is the key!
+    #### also save to stats & plotted
+      list_of_plotted[[paste0(fig_name_to_use)]] <- combo_stats
+      list_of_stats[[paste0(fig_name_to_use)]] <- combo_stats
+```
 
 
 
